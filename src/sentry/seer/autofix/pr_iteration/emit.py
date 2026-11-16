@@ -146,7 +146,7 @@ def outcome_for_failed_run(run_state: SeerRunState) -> str:
 
 
 def _seer_run(*, run_id: int, organization_id: int) -> SeerRun | None:
-    return SeerRun.objects.filter(seer_run_state_id=run_id, organization_id=organization_id).first()
+    return SeerRun.objects.filter(seer_run_state_id=run_id, organization_id=organization_id).first()  # noqa: S035
 
 
 def _claim_untriggered(seer_run: SeerRun) -> SeerRunPrIteration | None:
