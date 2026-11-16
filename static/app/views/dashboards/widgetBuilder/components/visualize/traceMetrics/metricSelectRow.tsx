@@ -16,6 +16,7 @@ import {
   extractTraceMetricFromColumn,
   getTraceMetricAggregateActionType,
   getTraceMetricDisplayFields,
+  getTraceMetricFunctionParts,
 } from 'sentry/views/dashboards/widgetBuilder/utils/buildTraceMetricAggregate';
 import {FieldValueKind} from 'sentry/views/discover/table/types';
 import {
@@ -39,52 +40,36 @@ function getDefaultAggregate(
   return aggregate as AggregationKeyWithAlias | undefined;
 }
 
-function getUpdatedAggregatesMultiMetric(
-  aggregateSource: Column[],
-  index: number,
+/**
+ * Returns the aggregate column for `field` after switching it to `newTraceMetric`.
+ * Keeps the current aggregation when the new metric type supports it and keeps
+ * any `_if` filter on the row.
+ */
+function getUpdatedAggregateField(
+  field: QueryFieldValue,
   newTraceMetric: TraceMetric
-): Column[] | undefined {
-  const validAggregateOptions = OPTIONS_BY_TYPE[newTraceMetric.type] ?? [];
-  const currentAggregateKey =
-    aggregateSource?.[index]?.kind === 'function'
-      ? aggregateSource[index].function[0]
-      : undefined;
+): Column | undefined {
+  if (field.kind !== FieldValueKind.FUNCTION) {
+    const aggregate = getDefaultAggregate(newTraceMetric);
+    return aggregate ? buildTraceMetricAggregate(aggregate, newTraceMetric) : undefined;
+  }
 
+  const parts = getTraceMetricFunctionParts(field);
+  const currentAggregateKey = parts?.aggregation as AggregationKeyWithAlias | undefined;
   if (!currentAggregateKey) {
     return undefined;
   }
 
+  const validAggregateOptions = OPTIONS_BY_TYPE[newTraceMetric.type] ?? [];
   const isValid = validAggregateOptions.some(opt => opt.value === currentAggregateKey);
-
   const nextAggregateKey = isValid
     ? currentAggregateKey
     : getDefaultAggregate(newTraceMetric);
-
   if (!nextAggregateKey) {
     return undefined;
   }
 
-  const updatedAggregate = buildTraceMetricAggregate(nextAggregateKey, newTraceMetric);
-
-  const updatedAggregates = [...(aggregateSource ?? [])];
-  updatedAggregates[index] = updatedAggregate;
-
-  return updatedAggregates;
-}
-
-function replaceFieldWithDefaultAggregate(
-  aggregateSource: Column[],
-  index: number,
-  traceMetric: TraceMetric
-): Column[] | undefined {
-  const aggregate = getDefaultAggregate(traceMetric);
-  if (!aggregate) {
-    return undefined;
-  }
-
-  const updatedAggregates = [...aggregateSource];
-  updatedAggregates[index] = buildTraceMetricAggregate(aggregate, traceMetric);
-  return updatedAggregates;
+  return buildTraceMetricAggregate(nextAggregateKey, newTraceMetric, parts?.filter);
 }
 
 export function MetricSelectRow({
@@ -92,11 +77,23 @@ export function MetricSelectRow({
   field,
   fieldSelector,
   index,
+  onFieldChange,
+  disabledAggregates,
 }: {
   disabled: boolean;
   field: QueryFieldValue;
   index: number;
+  /**
+   * Aggregations that cannot be picked for this row, with the reason shown
+   * in the dropdown.
+   */
+  disabledAggregates?: Record<string, string>;
   fieldSelector?: (autoSelectFirstColumn: boolean) => ReactNode;
+  /**
+   * When set, changes are reported here instead of being dispatched to the
+   * widget builder state. Used for rows that are not stored in the state.
+   */
+  onFieldChange?: (field: QueryFieldValue) => void;
 }) {
   const {state, dispatch} = useWidgetBuilderContext();
   const [shouldAutoSelectFirstColumn, setShouldAutoSelectFirstColumn] = useState(false);
@@ -107,9 +104,10 @@ export function MetricSelectRow({
     state.fields
   );
 
-  const traceMetric = (displayFields?.[index]
-    ? extractTraceMetricFromColumn(displayFields[index])
-    : undefined) ?? {name: '', type: ''};
+  // Rows stored in the builder state read the latest column from the state;
+  // controlled rows (hidden equation rows) read the column they were given.
+  const sourceField = onFieldChange ? field : (displayFields?.[index] ?? field);
+  const traceMetric = extractTraceMetricFromColumn(sourceField) ?? {name: '', type: ''};
 
   // Dashboards is visualization-first: once Heat Map is chosen, restrict the
   // metric picker to distributions (the only type a heat map can render).
@@ -131,14 +129,18 @@ export function MetricSelectRow({
         return;
       }
 
-      const updatedAggregates =
-        field.kind === FieldValueKind.FUNCTION
-          ? getUpdatedAggregatesMultiMetric(displayFields ?? [], index, newTraceMetric)
-          : replaceFieldWithDefaultAggregate(displayFields ?? [], index, newTraceMetric);
-
-      if (!updatedAggregates) {
+      const updatedField = getUpdatedAggregateField(field, newTraceMetric);
+      if (!updatedField) {
         return;
       }
+
+      if (onFieldChange) {
+        onFieldChange(updatedField);
+        return;
+      }
+
+      const updatedAggregates = [...(displayFields ?? [])];
+      updatedAggregates[index] = updatedField;
 
       // Sort fixup is handled by the dispatch handlers
       // (SET_Y_AXIS, SET_FIELDS, SET_CATEGORICAL_AGGREGATE)
@@ -147,7 +149,7 @@ export function MetricSelectRow({
         payload: updatedAggregates,
       });
     },
-    [displayFields, dispatch, field, index, state.displayType]
+    [displayFields, dispatch, field, index, onFieldChange, state.displayType]
   );
 
   const onSelectField = useCallback(() => {
@@ -209,6 +211,8 @@ export function MetricSelectRow({
             traceMetric={traceMetric}
             field={field}
             index={index}
+            onFieldChange={onFieldChange}
+            disabledAggregates={disabledAggregates}
           />
         </AggregateSelectorWrapper>
       )}

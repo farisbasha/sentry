@@ -4,6 +4,7 @@ import {arrayMove, SortableContext, verticalListSortingStrategy} from '@dnd-kit/
 import {useTheme} from '@emotion/react';
 import styled from '@emotion/styled';
 import {IconDelete} from '@sentry/icons/delete';
+import {IconHide} from '@sentry/icons/hide';
 import cloneDeep from 'lodash/cloneDeep';
 
 import {Button} from '@sentry/scraps/button';
@@ -11,6 +12,7 @@ import {Container, Flex, Stack} from '@sentry/scraps/layout';
 import {Radio} from '@sentry/scraps/radio';
 import {SegmentedControl} from '@sentry/scraps/segmentedControl';
 import type {SelectValue} from '@sentry/scraps/select';
+import {Tooltip} from '@sentry/scraps/tooltip';
 
 import {RadioLineItem} from 'sentry/components/forms/controls/radioGroup';
 import {FieldGroup} from 'sentry/components/forms/fieldGroup';
@@ -38,6 +40,12 @@ import {useIsEditingWidget} from 'sentry/views/dashboards/widgetBuilder/hooks/us
 import type {TraceMetricsVisualizeModeState} from 'sentry/views/dashboards/widgetBuilder/hooks/useTraceMetricsVisualizeModeState';
 import {useWidgetBuilderTraceItemConfig} from 'sentry/views/dashboards/widgetBuilder/hooks/useWidgetBuilderTraceItemConfig';
 import {SESSIONS_TAGS} from 'sentry/views/dashboards/widgetBuilder/releaseWidget/fields';
+import {
+  applyTraceMetricAggregateFilter,
+  extractTraceMetricFromColumn,
+  getTraceMetricFunctionParts,
+} from 'sentry/views/dashboards/widgetBuilder/utils/buildTraceMetricAggregate';
+import {hasUnifiedTraceMetricsVisualize} from 'sentry/views/dashboards/widgetBuilder/utils/hasUnifiedTraceMetricsVisualize';
 import {FieldValueKind} from 'sentry/views/discover/table/types';
 import {
   AddTransformationButton,
@@ -45,7 +53,10 @@ import {
 } from 'sentry/views/explore/components/toolbar/toolbarVisualize/visualizeTransformations';
 import {TypeBadge} from 'sentry/views/explore/components/typeBadge';
 import {useTraceItemDatasetAttributes} from 'sentry/views/explore/hooks/useTraceItemAttributes';
-import {HiddenTraceMetricSearchFields} from 'sentry/views/explore/metrics/constants';
+import {
+  HiddenTraceMetricSearchFields,
+  RATE_AGGREGATES,
+} from 'sentry/views/explore/metrics/constants';
 import {MAX_METRICS_ALLOWED} from 'sentry/views/explore/metrics/multiMetricsQueryParams';
 import {TraceItemDataset} from 'sentry/views/explore/types';
 import {
@@ -53,8 +64,18 @@ import {
   withBaseConditionalAggregateField,
 } from 'sentry/views/explore/utils/conditionalAggregate';
 
+import {HiddenTraceMetricRow} from './traceMetrics/hiddenTraceMetricRow';
 import {MetricSelectRow} from './traceMetrics/metricSelectRow';
 import {MetricsEquationVisualize} from './traceMetrics/metricsEquationVisualize';
+import {RowLabel} from './traceMetrics/rowLabel';
+import {TraceMetricEquationRow} from './traceMetrics/traceMetricEquationRow';
+import {TraceMetricRowFilter} from './traceMetrics/traceMetricRowFilter';
+import {
+  getUnifiedTraceMetricRows,
+  isAggregateReferenced,
+  replaceAggregateInEquations,
+  type HiddenTraceMetricRow as HiddenTraceMetricRowData,
+} from './traceMetrics/unifiedEquations';
 import {AggregateParameterField} from './aggregateParameterField';
 import {SelectRow} from './selectRow';
 import {buildTraceItemColumnOptions} from './traceItemColumnOptions';
@@ -72,6 +93,13 @@ import {
   StyledArithmeticInput,
 } from './utils';
 import {VisualizeGhostField} from './visualizeGhostField';
+
+const RATE_AGGREGATES_IN_EQUATION_DISABLED: Record<string, string> = Object.fromEntries(
+  Array.from(RATE_AGGREGATES, aggregate => [
+    aggregate,
+    t('Rate aggregates are not supported in equations'),
+  ])
+);
 
 const NONE_AGGREGATE = {
   textValue: t('field'),
@@ -132,10 +160,18 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
   // radio selection, mirroring Big Number.
   const isHeatmapWidget = state.displayType === DisplayType.HEATMAP;
 
+  // Behind the flag, trace metrics widgets list aggregates and equations side
+  // by side and there is no Series / Equation toggle.
+  const isUnifiedTraceMetrics =
+    state.dataset === WidgetType.TRACEMETRICS &&
+    hasUnifiedTraceMetricsVisualize(organization);
+
   // Heat maps don't support equations, so the equation mode toggle and the
   // "Add Equation" affordances are hidden for them.
   const canShowTraceMetricEquations =
-    state.dataset === WidgetType.TRACEMETRICS && !isHeatmapWidget;
+    state.dataset === WidgetType.TRACEMETRICS &&
+    !isHeatmapWidget &&
+    !isUnifiedTraceMetrics;
 
   const {isEquationMode, handleModeToggle, equationSnapshot} =
     traceMetricsVisualizeMode ?? {
@@ -221,6 +257,11 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
 
   const datasetConfig = useMemo(() => getDatasetConfig(state.dataset), [state.dataset]);
 
+  // Heat maps never take equations. Other trace metrics widgets take them in
+  // the unified list.
+  const enableEquations =
+    datasetConfig.enableEquations || (isUnifiedTraceMetrics && !isHeatmapWidget);
+
   // Determines which state field stores the visualization fields:
 
   // - Line, Area, Bar (Time Series): use state.yAxis for aggregates
@@ -254,7 +295,7 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
     isTimeSeriesWidget ||
     isTableWidget ||
     ((isBigNumberWidget || isCategoricalBarWidget || isHeatmapWidget) &&
-      (datasetConfig.enableEquations || canShowTraceMetricEquations));
+      (enableEquations || canShowTraceMetricEquations));
   // Determines which action to use for updating visualization fields:
   // - Line, Area, Bar (Time Series): SET_Y_AXIS for Y-axis aggregates
   // - Bar (Categorical): SET_CATEGORICAL_AGGREGATE (reducer handles merging with X-axis)
@@ -459,6 +500,65 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
       )
     )?.length ?? 0) >= MAX_METRICS_ALLOWED;
 
+  // Hidden rows, row letters and the equation reference map for the unified
+  // trace metrics list. Hidden rows exist only inside equations.
+  const unifiedRows = useMemo(
+    () => (isUnifiedTraceMetrics ? getUnifiedTraceMetricRows(fields ?? []) : null),
+    [isUnifiedTraceMetrics, fields]
+  );
+
+  // Replaces one visible row and rewrites any equation that referenced it.
+  const updateUnifiedField = (index: number, nextField: QueryFieldValue) => {
+    const currentFields = fields ?? [];
+    const previousField = currentFields[index];
+    let nextFields = currentFields.map((f, i) => (i === index ? nextField : f));
+    if (
+      previousField?.kind === FieldValueKind.FUNCTION &&
+      nextField.kind === FieldValueKind.FUNCTION
+    ) {
+      nextFields = replaceAggregateInEquations(
+        nextFields,
+        generateFieldAsString(previousField),
+        generateFieldAsString(nextField)
+      );
+    }
+    dispatch({type: updateAction, payload: nextFields});
+    setError?.({...error, queries: []});
+  };
+
+  // A hidden row lives inside the equations, so editing it rewrites them.
+  const updateHiddenRow = (row: HiddenTraceMetricRowData, nextField: QueryFieldValue) => {
+    dispatch({
+      type: updateAction,
+      payload: replaceAggregateInEquations(
+        fields ?? [],
+        row.aggregate,
+        generateFieldAsString(nextField)
+      ),
+    });
+    setError?.({...error, queries: []});
+  };
+
+  // Showing a hidden row adds it to the saved aggregates right above its equation.
+  const showHiddenRow = (row: HiddenTraceMetricRowData) => {
+    const currentFields = fields ?? [];
+    const payload = [
+      ...currentFields.slice(0, row.anchorIndex),
+      row.field,
+      ...currentFields.slice(row.anchorIndex),
+    ];
+    dispatch({
+      type: updateAction,
+      payload,
+      ...(usesYAxisState && {
+        // The new row has no transformations to carry over.
+        sourceIndices: payload.map((_, i) =>
+          i < row.anchorIndex ? i : i === row.anchorIndex ? -1 : i - 1
+        ),
+      }),
+    });
+  };
+
   return (
     <Fragment>
       <SectionHeader
@@ -538,7 +638,8 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                       // The spans dataset can have a single equation, so isOnlyFieldOrAggregate
                       // is not applicable. The errors dataset requires one series to be
                       // selected for equations to work.
-                      state.dataset !== WidgetType.SPANS;
+                      state.dataset !== WidgetType.SPANS &&
+                      !isUnifiedTraceMetrics;
 
                     // Depending on the dataset and the display type, we use different options for
                     // displaying in the column select.
@@ -640,7 +741,34 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                       setError?.({...error, queries: []});
                     };
 
-                    return (
+                    const rowLabel = unifiedRows?.stateLabels.get(index);
+                    const isReferencedByEquation =
+                      unifiedRows !== null &&
+                      isAggregateReferenced(unifiedRows.referencedKeys, field);
+                    const unifiedRowFilter =
+                      isUnifiedTraceMetrics && field.kind === FieldValueKind.FUNCTION
+                        ? (getTraceMetricFunctionParts(field)?.filter ?? '')
+                        : undefined;
+
+                    // Hidden equation rows render right above the first equation
+                    // that uses them. They are not sortable items.
+                    const hiddenRowElements =
+                      unifiedRows?.hiddenRowsByAnchor
+                        .get(index)
+                        ?.map(row => (
+                          <HiddenTraceMetricRow
+                            key={row.aggregate}
+                            row={row}
+                            label={unifiedRows.hiddenLabels.get(row.aggregate) ?? ''}
+                            indent={!!canDrag}
+                            disabled={disableTransactionWidget}
+                            onFieldChange={nextField => updateHiddenRow(row, nextField)}
+                            onShow={() => showHiddenRow(row)}
+                          />
+                        )) ?? [];
+
+                    return [
+                      ...hiddenRowElements,
                       <SortableVisualizeFieldWrapper
                         dragId={draggableFieldIds[index] ?? ''}
                         canDrag={!!canDrag}
@@ -649,6 +777,7 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                         {activeId !== null && index === Number(activeId) ? null : (
                           <Stack gap="md" flex="1" minWidth="0">
                             <FieldRow>
+                              {rowLabel && <RowLabel label={rowLabel} />}
                               {fields.length > 1 &&
                                 (state.displayType === DisplayType.BIG_NUMBER ||
                                   state.displayType === DisplayType.CATEGORICAL_BAR ||
@@ -715,6 +844,23 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                                         );
                                       }}
                                     />
+                                  ) : isUnifiedTraceMetrics ? (
+                                    <TraceMetricEquationRow
+                                      equation={field.field}
+                                      referenceMap={unifiedRows?.referenceMap ?? {}}
+                                      disabled={disableTransactionWidget}
+                                      onUpdate={value => {
+                                        dispatch({
+                                          type: updateAction,
+                                          payload: fields.map((_field, i) =>
+                                            i === index
+                                              ? {..._field, field: value}
+                                              : _field
+                                          ),
+                                        });
+                                        setError?.({...error, queries: []});
+                                      }}
+                                    />
                                   ) : (
                                     <StyledArithmeticInput
                                       name="arithmetic"
@@ -754,41 +900,75 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                                 ) : (
                                   <Fragment>
                                     {state.dataset === WidgetType.TRACEMETRICS ? (
-                                      <MetricSelectRow
-                                        // Heat maps always count() the metric, so
-                                        // the aggregate function is locked (only the
-                                        // metric is selectable), mirroring Explore.
-                                        disabled={
-                                          disableTransactionWidget || isHeatmapWidget
-                                        }
-                                        field={field}
-                                        fieldSelector={autoSelectFirstColumn =>
-                                          field.kind === FieldValueKind.FIELD ? (
-                                            <SelectRow
-                                              autoSelectFirstColumn={
-                                                autoSelectFirstColumn
+                                      <Fragment>
+                                        <MetricSelectRow
+                                          // Heat maps always count() the metric, so
+                                          // the aggregate function is locked (only the
+                                          // metric is selectable), mirroring Explore.
+                                          disabled={
+                                            disableTransactionWidget || isHeatmapWidget
+                                          }
+                                          field={field}
+                                          onFieldChange={
+                                            isUnifiedTraceMetrics
+                                              ? nextField =>
+                                                  updateUnifiedField(index, nextField)
+                                              : undefined
+                                          }
+                                          disabledAggregates={
+                                            isReferencedByEquation
+                                              ? RATE_AGGREGATES_IN_EQUATION_DISABLED
+                                              : undefined
+                                          }
+                                          fieldSelector={autoSelectFirstColumn =>
+                                            field.kind === FieldValueKind.FIELD ? (
+                                              <SelectRow
+                                                autoSelectFirstColumn={
+                                                  autoSelectFirstColumn
+                                                }
+                                                showAggregateSelector={false}
+                                                field={field}
+                                                index={index}
+                                                hasColumnParameter={hasColumnParameter}
+                                                columnOptions={columnOptions}
+                                                aggregateOptions={aggregateOptions}
+                                                stringFields={stringFields}
+                                                error={error}
+                                                setError={setError}
+                                                fields={fields}
+                                                source={source}
+                                                isEditing={isEditing}
+                                                fieldOptions={fieldOptions}
+                                                columnFilterMethod={columnFilterMethod}
+                                                aggregates={aggregates}
+                                                disabled={disableTransactionWidget}
+                                              />
+                                            ) : undefined
+                                          }
+                                          index={index}
+                                        />
+                                        {unifiedRowFilter !== undefined && (
+                                          <TraceMetricRowFilter
+                                            traceMetric={
+                                              extractTraceMetricFromColumn(field) ?? {
+                                                name: '',
+                                                type: '',
                                               }
-                                              showAggregateSelector={false}
-                                              field={field}
-                                              index={index}
-                                              hasColumnParameter={hasColumnParameter}
-                                              columnOptions={columnOptions}
-                                              aggregateOptions={aggregateOptions}
-                                              stringFields={stringFields}
-                                              error={error}
-                                              setError={setError}
-                                              fields={fields}
-                                              source={source}
-                                              isEditing={isEditing}
-                                              fieldOptions={fieldOptions}
-                                              columnFilterMethod={columnFilterMethod}
-                                              aggregates={aggregates}
-                                              disabled={disableTransactionWidget}
-                                            />
-                                          ) : undefined
-                                        }
-                                        index={index}
-                                      />
+                                            }
+                                            initialQuery={unifiedRowFilter}
+                                            disabled={disableTransactionWidget}
+                                            onSearch={filter =>
+                                              updateUnifiedField(
+                                                index,
+                                                applyTraceMetricAggregateFilter(
+                                                  field,
+                                                  filter
+                                                )
+                                              )
+                                            }
+                                          />
+                                        )}
+                                      </Fragment>
                                     ) : (
                                       <SelectRow
                                         field={field}
@@ -938,44 +1118,75 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                                       />
                                     </Flex>
                                   )}
+                                  {isReferencedByEquation && (
+                                    <Flex align="center" height={theme.form.md.height}>
+                                      <Tooltip
+                                        title={t(
+                                          'Hide this series from the chart. The equation keeps using it.'
+                                        )}
+                                      >
+                                        <Button
+                                          variant="transparent"
+                                          icon={<IconHide />}
+                                          size="zero"
+                                          disabled={disableTransactionWidget}
+                                          aria-label={t('Hide series')}
+                                          onClick={() => {
+                                            dispatch({
+                                              type: BuilderStateAction.DELETE_AGGREGATE,
+                                              payload: index,
+                                            });
+                                          }}
+                                        />
+                                      </Tooltip>
+                                    </Flex>
+                                  )}
                                   {(!isBigNumberWidget ||
-                                    datasetConfig.enableEquations ||
+                                    enableEquations ||
                                     (isBigNumberWidget && fields.length > 1)) && (
                                     <Flex align="center" height={theme.form.md.height}>
-                                      <Button
-                                        variant="transparent"
-                                        icon={<IconDelete />}
-                                        size="zero"
-                                        disabled={
-                                          fields.length <= 1 ||
-                                          !canDelete ||
-                                          isOnlyFieldOrAggregate
-                                        }
-                                        onClick={() => {
-                                          dispatch({
-                                            type: BuilderStateAction.DELETE_AGGREGATE,
-                                            payload: index,
-                                          });
+                                      <Tooltip
+                                        title={t(
+                                          'This series is used in an equation. Hide it instead of deleting it.'
+                                        )}
+                                        disabled={!isReferencedByEquation}
+                                      >
+                                        <Button
+                                          variant="transparent"
+                                          icon={<IconDelete />}
+                                          size="zero"
+                                          disabled={
+                                            fields.length <= 1 ||
+                                            !canDelete ||
+                                            isOnlyFieldOrAggregate ||
+                                            isReferencedByEquation
+                                          }
+                                          onClick={() => {
+                                            dispatch({
+                                              type: BuilderStateAction.DELETE_AGGREGATE,
+                                              payload: index,
+                                            });
 
-                                          trackAnalytics(
-                                            'dashboards_views.widget_builder.change',
-                                            {
-                                              builder_version:
-                                                WidgetBuilderVersion.SLIDEOUT,
-                                              field:
-                                                field.kind === FieldValueKind.EQUATION
-                                                  ? 'visualize.deleteEquation'
-                                                  : 'visualize.deleteField',
-                                              from: source,
-                                              new_widget: !isEditing,
-                                              value: '',
-                                              widget_type: state.dataset ?? '',
-                                              organization,
-                                            }
-                                          );
-                                        }}
-                                        aria-label={t('Remove field')}
-                                      />
+                                            trackAnalytics(
+                                              'dashboards_views.widget_builder.change',
+                                              {
+                                                builder_version:
+                                                  WidgetBuilderVersion.SLIDEOUT,
+                                                field:
+                                                  field.kind === FieldValueKind.EQUATION
+                                                    ? 'visualize.deleteEquation'
+                                                    : 'visualize.deleteField',
+                                                from: source,
+                                                new_widget: !isEditing,
+                                                value: '',
+                                                widget_type: state.dataset ?? '',
+                                                organization,
+                                              }
+                                            );
+                                          }}
+                                          aria-label={t('Remove field')}
+                                        />
+                                      </Tooltip>
                                     </Flex>
                                   )}
                                 </Flex>
@@ -995,8 +1206,8 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                               )}
                           </Stack>
                         )}
-                      </SortableVisualizeFieldWrapper>
-                    );
+                      </SortableVisualizeFieldWrapper>,
+                    ];
                   })}
                 </Stack>
               </SortableContext>
@@ -1058,8 +1269,8 @@ export function Visualize({error, setError, traceMetricsVisualizeMode}: Visualiz
                     ? t('+ Add Field')
                     : t('+ Add Column')}
               </AddButton>
-              {datasetConfig.enableEquations &&
-                state.dataset !== WidgetType.TRACEMETRICS && (
+              {enableEquations &&
+                (state.dataset !== WidgetType.TRACEMETRICS || isUnifiedTraceMetrics) && (
                   <AddButton
                     variant="link"
                     disabled={disableTransactionWidget}
