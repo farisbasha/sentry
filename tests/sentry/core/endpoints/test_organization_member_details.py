@@ -196,6 +196,36 @@ class GetOrganizationMemberTest(OrganizationMemberTestBase):
 class UpdateOrganizationMemberTest(OrganizationMemberTestBase, HybridCloudTestMixin):
     method = "put"
 
+    @patch(
+        "sentry.core.endpoints.organization_member_details.OrganizationMemberDetailsEndpoint.create_audit_entry"
+    )
+    def test_rejected_self_role_change_preserves_teams(self, create_audit: MagicMock) -> None:
+        member = OrganizationMember.objects.get(
+            organization=self.organization, user_id=self.user.id
+        )
+        self.create_team(organization=self.organization, members=[self.user])
+        replacement_team = self.create_team(organization=self.organization)
+        assignments = OrganizationMemberTeam.objects.filter(organizationmember=member)
+        original_assignments = list(assignments.values_list("team_id", "role"))
+
+        team_changes: list[dict[str, object]] = [
+            {"teamRoles": []},
+            {"teamRoles": [{"teamSlug": replacement_team.slug, "role": None}]},
+            {"teams": []},
+            {"teams": [replacement_team.slug]},
+        ]
+        for changes in team_changes:
+            response = self.get_error_response(
+                self.organization.slug,
+                member.id,
+                orgRole="manager",
+                **changes,
+                status_code=400,
+            )
+            assert response.data["detail"] == "You cannot make changes to your own role."
+            assert list(assignments.values_list("team_id", "role")) == original_assignments
+            create_audit.assert_not_called()
+
     def test_invalid_team_roles(self) -> None:
         member = self.create_member(
             organization=self.organization,
@@ -803,12 +833,16 @@ class UpdateOrganizationMemberTest(OrganizationMemberTestBase, HybridCloudTestMi
             organization=self.organization, user=member, role="member", teams=[]
         )
 
-        self.get_error_response(self.organization.slug, member_om.id, role="admin", status_code=400)
+        team = self.create_team(organization=self.organization, members=[member])
+        self.get_error_response(
+            self.organization.slug, member_om.id, role="admin", teamRoles=[], status_code=400
+        )
 
         member_om = OrganizationMember.objects.get(
             organization=self.organization, user_id=member.id
         )
         assert member_om.role == "member"
+        assert member_om.teams.filter(id=team.id).exists()
 
     @patch("sentry.models.OrganizationMember.send_sso_link_email")
     def test_cannot_reinvite_normal_member(self, mock_send_sso_link_email: MagicMock) -> None:
@@ -827,10 +861,14 @@ class UpdateOrganizationMemberTest(OrganizationMemberTestBase, HybridCloudTestMi
         self.create_member(organization=self.organization, user=manager, role="manager", teams=[])
         self.login_as(manager)
 
-        self.get_error_response(self.organization.slug, owner_om.id, role="member", status_code=403)
+        team = self.create_team(organization=self.organization, members=[owner])
+        self.get_error_response(
+            self.organization.slug, owner_om.id, role="member", teamRoles=[], status_code=403
+        )
 
         owner_om = OrganizationMember.objects.get(organization=self.organization, user_id=owner.id)
         assert owner_om.role == "owner"
+        assert owner_om.teams.filter(id=team.id).exists()
 
     def test_with_internal_integration(self) -> None:
         member = self.create_user("baz@example.com")

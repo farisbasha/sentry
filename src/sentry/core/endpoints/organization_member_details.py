@@ -329,8 +329,6 @@ class OrganizationMemberDetailsEndpoint(OrganizationMemberEndpoint):
 
         assigned_org_role = result.get("orgRole") or result.get("role")
 
-        # Set the team-role before org-role. If the org-role has elevated permissions
-        # on the teams, the team-roles can be overwritten later
         team_roles: tuple[TeamAssignment, ...] | None = None
         teams = None
         if team_assignments is not None:
@@ -353,6 +351,36 @@ class OrganizationMemberDetailsEndpoint(OrganizationMemberEndpoint):
                     status=400,
                 )
 
+        changes_role = assigned_org_role and assigned_org_role != member.role
+
+        if changes_role:
+            # TODO(adas): Reenable idp lockout once all scim role bugs are resolved.
+            allowed_role_ids = {r.id for r in allowed_roles}
+
+            if assigned_org_role not in allowed_role_ids:
+                return Response(
+                    {"role": "You do not have permission to assign the given role."}, status=403
+                )
+
+            if member.role not in allowed_role_ids:
+                return Response(
+                    {"role": "You do not have permission to assign a role to the given user."},
+                    status=403,
+                )
+
+            if member.user_id == request_user.id:
+                return Response({"detail": "You cannot make changes to your own role."}, status=400)
+
+            if (
+                features.has("organizations:team-roles", organization)
+                and organization_roles.get(assigned_org_role).is_retired
+            ):
+                message = (
+                    f"The role '{assigned_org_role}' is deprecated and may no longer be assigned."
+                )
+                return Response({"detail": message}, status=400)
+
+        # Changing the organization role can reset team roles, so apply team assignments first.
         if team_roles is not None:
             diff = save_team_assignments(member, None, team_roles)
         elif "teams" in result:
@@ -379,39 +407,7 @@ class OrganizationMemberDetailsEndpoint(OrganizationMemberEndpoint):
                 data={"email": member.get_email(), "team_slug": change.team.slug},
             )
 
-        is_update_org_role = assigned_org_role and assigned_org_role != member.role
-
-        if is_update_org_role:
-            # TODO(adas): Reenable idp lockout once all scim role bugs are resolved.
-
-            allowed_role_ids = {r.id for r in allowed_roles}
-
-            # A user cannot promote others above themselves
-            if assigned_org_role not in allowed_role_ids:
-                return Response(
-                    {"role": "You do not have permission to assign the given role."}, status=403
-                )
-
-            # A user cannot demote a superior
-            if member.role not in allowed_role_ids:
-                return Response(
-                    {"role": "You do not have permission to assign a role to the given user."},
-                    status=403,
-                )
-
-            if member.user_id == request_user.id and (assigned_org_role != member.role):
-                return Response({"detail": "You cannot make changes to your own role."}, status=400)
-
-            if (
-                features.has("organizations:team-roles", organization)
-                and organization_roles.get(assigned_org_role).is_retired
-                and assigned_org_role != member.role
-            ):
-                message = (
-                    f"The role '{assigned_org_role}' is deprecated and may no longer be assigned."
-                )
-                return Response({"detail": message}, status=400)
-
+        if changes_role:
             previous_role = member.role
             self._change_org_role(member, assigned_org_role)
 
