@@ -184,7 +184,7 @@ def _sync_artifact_bundle(source_artifact_bundle: ArtifactBundle, target_org: Or
 
             _sync_project_artifact_bundle(source_artifact_bundle, target_artifact_bundle)
             _sync_release_artifact_bundle(source_artifact_bundle, target_artifact_bundle)
-    except IntegrityError as e:
+    except Exception as e:
         sentry_sdk.capture_exception(e)
 
 
