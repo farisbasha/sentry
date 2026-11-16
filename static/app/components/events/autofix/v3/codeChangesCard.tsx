@@ -463,7 +463,7 @@ export function CodeChangesCard({autofix, groupId, section}: CodeChangesCardProp
               variant="primary"
               icon={<IconRefresh />}
               disabled={isSingleRun ? singleRunRerun.disabled : !canReset}
-              onClick={isSingleRun ? singleRunRerun.rerun : () => handleReset()}
+              onClick={isSingleRun ? () => singleRunRerun.rerun() : () => handleReset()}
             >
               {t('Re-run')}
             </Button>
