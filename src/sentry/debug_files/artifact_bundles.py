@@ -241,6 +241,24 @@ def maybe_renew_artifact_bundles(used_artifact_bundles: dict[int, datetime]) -> 
 @traces.trace
 def renew_artifact_bundle(artifact_bundle_id: int, threshold_date: datetime, now: datetime) -> None:
     metrics.incr("artifact_bundle_renewal.need_renewal")
+    bundles = ArtifactBundle.objects.filter(id=artifact_bundle_id, date_added__lte=threshold_date)
+    bundle = bundles.first()
+    if bundle is None:
+        return
+
+    # Do network I/O before the transaction. Only advance the database timestamp after
+    # Objectstore has renewed the TTI, so a failed request is retried on the next access.
+    if bundle.storage_path is not None:
+        try:
+            metadata = bundle.get_objectstore_session().head(bundle.storage_path)
+        except Exception:
+            logger.exception("artifact_bundle.objectstore_renewal_failed")
+            return
+        if metadata is None:
+            # A concurrent reupload may have replaced the missing object with a File.
+            bundles.filter(storage_path=bundle.storage_path).delete()
+            return
+
     # We want to use a transaction, in order to keep the `date_added` consistent across multiple tables.
     with atomic_transaction(
         using=(
@@ -251,11 +269,9 @@ def renew_artifact_bundle(artifact_bundle_id: int, threshold_date: datetime, now
             router.db_for_write(ArtifactBundleIndex),
         )
     ):
-        # We check again for the date_added condition in order to achieve consistency, this is done because
-        # the `can_be_renewed` call is using a time which differs from the one of the actual update in the db.
-        updated_rows_count = ArtifactBundle.objects.filter(
-            id=artifact_bundle_id, date_added__lte=threshold_date
-        ).update(date_added=now)
+        # Recheck eligibility and the storage path in case another request renewed or
+        # replaced the bundle while we were contacting Objectstore.
+        updated_rows_count = bundles.filter(storage_path=bundle.storage_path).update(date_added=now)
         # We want to make cascading queries only if there were actual changes in the db. Nothing reads `date_added`
         # from the rows linked to the bundle, so with `date-only-on-bundle` they aren't renewed, which spares
         # rewriting every URL index and debug-ID row of the bundle.

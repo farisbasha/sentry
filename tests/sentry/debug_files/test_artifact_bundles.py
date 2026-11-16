@@ -10,6 +10,7 @@ from django.core.files.base import ContentFile
 from django.db import connections, router
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
+from objectstore_client import Metadata
 
 from sentry.debug_files.artifact_bundles import (
     get_artifact_bundles_containing_debug_id,
@@ -18,6 +19,7 @@ from sentry.debug_files.artifact_bundles import (
     get_cached_bundles_indexing_state,
     get_redis_cluster_for_artifact_bundles,
     index_urls_in_bundle,
+    maybe_renew_artifact_bundles,
     query_artifact_bundles_containing_file,
     renew_artifact_bundle,
 )
@@ -37,6 +39,7 @@ from sentry.tasks.assemble import assemble_artifacts
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.options import override_options
 from sentry.testutils.objectstore import artifact_bundles_test_both_backends
+from sentry.testutils.skips import requires_objectstore
 from sentry.utils import json
 
 
@@ -1157,9 +1160,13 @@ class GetArtifactBundlesContainingDebugIdTest(TestCase):
 
 
 class RenewArtifactBundleTest(TestCase):
+    use_objectstore = False
+
     def setUp(self) -> None:
         self.old_date = timezone.now() - timedelta(days=60)
-        self.artifact_bundle = self.create_artifact_bundle(self.organization, artifact_count=1)
+        self.artifact_bundle = self.create_artifact_bundle(
+            self.organization, artifact_count=1, use_objectstore=self.use_objectstore
+        )
         ArtifactBundle.objects.filter(id=self.artifact_bundle.id).update(date_added=self.old_date)
         ProjectArtifactBundle.objects.create(
             organization_id=self.organization.id,
@@ -1214,3 +1221,66 @@ class RenewArtifactBundleTest(TestCase):
 
         assert ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == now
         assert self.linked_dates() == {self.old_date}
+
+
+@requires_objectstore
+class RenewObjectstoreArtifactBundleTest(RenewArtifactBundleTest):
+    use_objectstore = True
+
+    def test_renews_objectstore_before_database(self) -> None:
+        session = self.artifact_bundle.get_objectstore_session()
+        original_head = session.head
+
+        def head(storage_path: str) -> Metadata | None:
+            assert (
+                ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == self.old_date
+            )
+            return original_head(storage_path)
+
+        with (
+            patch.object(ArtifactBundle, "get_objectstore_session", return_value=session),
+            patch.object(session, "head", side_effect=head) as mock_head,
+        ):
+            maybe_renew_artifact_bundles({self.artifact_bundle.id: self.old_date})
+
+        mock_head.assert_called_once_with(self.artifact_bundle.storage_path)
+        renewed = ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added
+        assert renewed > self.old_date
+        assert self.linked_dates() == {renewed}
+
+    def test_failed_renewal_retries_on_next_access(self) -> None:
+        session = self.artifact_bundle.get_objectstore_session()
+        with (
+            patch.object(ArtifactBundle, "get_objectstore_session", return_value=session),
+            patch.object(session, "head", side_effect=OSError("Objectstore unavailable")),
+        ):
+            self.renew()
+
+        assert ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == self.old_date
+        assert self.linked_dates() == {self.old_date}
+
+        now = self.renew()
+        assert ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == now
+        assert self.linked_dates() == {now}
+
+    def test_missing_object_removes_bundle_and_linked_rows(self) -> None:
+        assert self.artifact_bundle.storage_path is not None
+        self.artifact_bundle.get_objectstore_session().delete(self.artifact_bundle.storage_path)
+
+        self.renew()
+
+        bundle_id = self.artifact_bundle.id
+        assert not ArtifactBundle.objects.filter(id=bundle_id).exists()
+        assert not ProjectArtifactBundle.objects.filter(artifact_bundle_id=bundle_id).exists()
+        assert not ReleaseArtifactBundle.objects.filter(artifact_bundle_id=bundle_id).exists()
+        assert not DebugIdArtifactBundle.objects.filter(artifact_bundle_id=bundle_id).exists()
+        assert not ArtifactBundleIndex.objects.filter(artifact_bundle_id=bundle_id).exists()
+
+    def test_already_renewed_bundle_skips_objectstore(self) -> None:
+        now = self.renew()
+        with patch.object(ArtifactBundle, "get_objectstore_session") as mock_session:
+            # The lookup may still carry the date from before a concurrent renewal.
+            maybe_renew_artifact_bundles({self.artifact_bundle.id: self.old_date})
+
+        mock_session.assert_not_called()
+        assert ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == now
