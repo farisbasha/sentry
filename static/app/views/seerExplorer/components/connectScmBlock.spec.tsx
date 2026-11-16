@@ -13,9 +13,15 @@ const REPO_ACCESS_URL = '/organizations/org-slug/seer/repo-access/';
 const INTEGRATIONS_LINK =
   '/settings/org-slug/integrations/?category=source%20code%20management';
 const REPOS_LINK = '/settings/org-slug/repos/';
+const INTEGRATION_REQUEST_URL = '/organizations/org-slug/integration-requests/';
 
 describe('ConnectScmBlock', () => {
   const organization = OrganizationFixture({slug: 'org-slug'});
+  // Can't install integrations.
+  const memberOrganization = OrganizationFixture({
+    slug: 'org-slug',
+    access: ['org:read', 'project:read', 'team:read'],
+  });
 
   function mockRepoAccess(status: string, connectedAccounts: string[] = []) {
     return MockApiClient.addMockResponse({
@@ -27,8 +33,10 @@ describe('ConnectScmBlock', () => {
 
   function renderBlock({
     failureReason = 'no_scm_integration',
+    org = organization,
   }: {
     failureReason?: string;
+    org?: typeof organization;
   } = {}) {
     const respondToUserInput = jest.fn();
     const pendingInput: PendingUserInput = {
@@ -41,7 +49,7 @@ describe('ConnectScmBlock', () => {
         pendingInput={pendingInput}
         respondToUserInput={respondToUserInput}
       />,
-      {organization}
+      {organization: org}
     );
     return respondToUserInput;
   }
@@ -105,6 +113,50 @@ describe('ConnectScmBlock', () => {
       'href',
       REPOS_LINK
     );
+  });
+
+  it('lets a member request source control instead of linking to integrations', async () => {
+    mockRepoAccess('scm_account_not_connected', ['acme-labs']);
+    const request = MockApiClient.addMockResponse({
+      url: INTEGRATION_REQUEST_URL,
+      method: 'POST',
+      statusCode: 201,
+    });
+    renderBlock({failureReason: 'scm_account_not_connected', org: memberOrganization});
+
+    await userEvent.click(
+      await screen.findByRole('button', {name: 'Request installation'})
+    );
+
+    expect(
+      screen.queryByRole('button', {name: 'Go to integrations'})
+    ).not.toBeInTheDocument();
+    expect(request).toHaveBeenCalledWith(
+      INTEGRATION_REQUEST_URL,
+      expect.objectContaining({
+        data: {
+          providerType: 'category',
+          providerSlug: 'source code management',
+          message:
+            "Seer can't access acme/app. This repo's account isn't connected to this organization. Connected: acme-labs.",
+        },
+      })
+    );
+    expect(
+      await screen.findByRole('button', {name: 'Installation requested'})
+    ).toBeDisabled();
+  });
+
+  it('links a member to repositories when the repo is not in Sentry', async () => {
+    mockRepoAccess('repo_not_in_sentry');
+    renderBlock({failureReason: 'repo_not_in_sentry', org: memberOrganization});
+
+    expect(
+      await screen.findByRole('button', {name: 'Go to repositories'})
+    ).toHaveAttribute('href', REPOS_LINK);
+    expect(
+      screen.queryByRole('button', {name: 'Request installation'})
+    ).not.toBeInTheDocument();
   });
 
   it('retries on Continue once Seer can access the repo', async () => {

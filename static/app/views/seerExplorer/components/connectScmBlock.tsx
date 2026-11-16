@@ -1,5 +1,5 @@
 import {useEffect, useState} from 'react';
-import {useQuery} from '@tanstack/react-query';
+import {useMutation, useQuery} from '@tanstack/react-query';
 import {motion} from 'framer-motion';
 
 import {Alert} from '@sentry/scraps/alert';
@@ -7,10 +7,14 @@ import {Button, LinkButton} from '@sentry/scraps/button';
 import {Input} from '@sentry/scraps/input';
 import {Container, Stack} from '@sentry/scraps/layout';
 import {Text} from '@sentry/scraps/text';
+import {toast} from '@sentry/scraps/toast';
 
 import {Placeholder} from 'sentry/components/placeholder';
 import {t} from 'sentry/locale';
 import {apiOptions} from 'sentry/utils/api/apiOptions';
+import {getApiUrl} from 'sentry/utils/api/getApiUrl';
+import {canManageIntegrations} from 'sentry/utils/integrationUtil';
+import {fetchMutation} from 'sentry/utils/queryClient';
 import {useOrganization} from 'sentry/utils/useOrganization';
 import {useTimeout} from 'sentry/utils/useTimeout';
 import type {
@@ -24,6 +28,10 @@ import type {
 // user refreshes the page.
 const POLL_INTERVAL_MS = 5_000;
 const POLL_FOR_MS = 10 * 60_000;
+
+// The integrations directory filtered to source control: where the popup sends admins, and where
+// a member's request sends the owners.
+const SCM_CATEGORY = 'source code management';
 
 interface RepoAccess {
   connectedAccounts: string[];
@@ -49,15 +57,19 @@ function isSettled(status: string) {
   return isFound(status) || status === 'unknown';
 }
 
+interface Problem {
+  body: string;
+  fix: {label: string; to: string};
+  /** The fix is installing source control, which only admins can do; members request it. */
+  needsInstall: boolean;
+}
+
 /**
  * What's stopping Seer from opening the repo, and where to go to fix it. Null when nothing
  * Sentry can name is, so Continue is the way forward.
  */
-function getProblem(
-  access: RepoAccess,
-  orgSlug: string
-): {body: string; fix: {label: string; to: string}} | null {
-  const integrationsPath = `/settings/${orgSlug}/integrations/?category=source%20code%20management`;
+function getProblem(access: RepoAccess, orgSlug: string): Problem | null {
+  const integrationsPath = `/settings/${orgSlug}/integrations/?category=${encodeURIComponent(SCM_CATEGORY)}`;
 
   if (isFound(access.status)) {
     return null;
@@ -69,6 +81,7 @@ function getProblem(
       return {
         body: t('No source control is connected to this organization.'),
         fix: {label: t('Connect source control'), to: integrationsPath},
+        needsInstall: true,
       };
     case 'scm_account_not_connected':
       return {
@@ -79,6 +92,7 @@ function getProblem(
             )
           : t("This repo's account isn't connected to this organization."),
         fix: {label: t('Go to integrations'), to: integrationsPath},
+        needsInstall: true,
       };
     case 'repo_not_in_sentry':
       return {
@@ -86,13 +100,52 @@ function getProblem(
           "This repo isn't in Sentry. Check its name, and that Sentry has access to it."
         ),
         fix: {label: t('Go to repositories'), to: `/settings/${orgSlug}/repos/`},
+        needsInstall: false,
       };
     default:
       return {
         body: t("Seer couldn't open this repo."),
         fix: {label: t('Go to integrations'), to: integrationsPath},
+        needsInstall: false,
       };
   }
+}
+
+/**
+ * For members, who can't install integrations: emails the organization's owners to install
+ * source control, with why Seer needs it.
+ */
+function RequestInstallButton({message}: {message: string}) {
+  const organization = useOrganization();
+  const request = useMutation({
+    mutationFn: () =>
+      fetchMutation({
+        url: getApiUrl('/organizations/$organizationIdOrSlug/integration-requests/', {
+          path: {organizationIdOrSlug: organization.slug},
+        }),
+        method: 'POST',
+        // Any source control integration will do, and the message says what for.
+        data: {providerType: 'category', providerSlug: SCM_CATEGORY, message},
+      }),
+    onSuccess: () => {
+      toast.success(t('Request sent to your organization owners.'));
+    },
+    onError: () => {
+      toast.error(t('Error sending the request'));
+    },
+  });
+
+  return (
+    <Button
+      size="sm"
+      variant="primary"
+      busy={request.isPending}
+      disabled={request.isPending || request.isSuccess}
+      onClick={() => request.mutate()}
+    >
+      {request.isSuccess ? t('Installation requested') : t('Request installation')}
+    </Button>
+  );
 }
 
 function CorrectRepoForm({
@@ -211,6 +264,7 @@ export function ConnectScmBlock({
   const problem = getProblem(access, organization.slug);
   const found = isFound(access.status);
   const stoppedWatching = !isWatching && !isSettled(access.status);
+  const mustRequest = !!problem?.needsInstall && !canManageIntegrations(organization);
 
   if (isChecking) {
     return (
@@ -251,6 +305,13 @@ export function ConnectScmBlock({
                         "Sentry can't tell what's wrong. Check the repo name, or continue and Seer will try again."
                       ))}
               </Text>
+              {mustRequest && (
+                <Text size="sm">
+                  {t(
+                    'Only an admin can connect it. Request it, and you can continue here once it is.'
+                  )}
+                </Text>
+              )}
               {stoppedWatching && (
                 <Text size="sm" variant="muted">
                   {t('Stopped checking. Refresh the page to check again.')}
@@ -272,7 +333,11 @@ export function ConnectScmBlock({
             ) : (
               // The first button is the way forward: where to fix it, or Continue once fixed.
               <Stack gap="sm" align="start">
-                {problem ? (
+                {problem && mustRequest ? (
+                  <RequestInstallButton
+                    message={`${t("Seer can't access %s.", data.repo_name)} ${problem.body}`}
+                  />
+                ) : problem ? (
                   <LinkButton
                     to={problem.fix.to}
                     openInNewTab
