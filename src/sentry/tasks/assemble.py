@@ -829,10 +829,16 @@ class ArtifactBundlePostAssembler:
                 # Only if the file objects are different we want to update the database, otherwise we will end up
                 # deleting a newly bound file.
                 if existing_file != self.assemble_result.bundle:
+                    old_storage_path = existing_artifact_bundle.storage_path
                     # In case there is an ArtifactBundle with a specific bundle_id, we want to change its underlying
                     # File model with its corresponding artifact count and also update the dates.
                     existing_artifact_bundle.update(
                         file=self.assemble_result.bundle,
+                        storage_path=None,
+                        checksum=None,
+                        content_type=None,
+                        file_size=None,
+                        date_created=None,
                         artifact_count=self.archive.artifact_count,
                         date_added=date_added,
                         # If you upload a bundle which already exists, we track this as a modification since our goal
@@ -843,6 +849,8 @@ class ArtifactBundlePostAssembler:
                     if existing_file is not None:
                         # We now delete that file, in order to avoid orphan files in the database.
                         existing_file.delete()
+                    if old_storage_path is not None:
+                        existing_artifact_bundle.delete_objectstore_file(old_storage_path)
                 # else: are we leaking the `assemble_result.bundle` in this case?
 
                 return existing_artifact_bundle, False

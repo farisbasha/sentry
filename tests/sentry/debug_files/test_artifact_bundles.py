@@ -36,6 +36,7 @@ from sentry.models.project import Project
 from sentry.tasks.assemble import assemble_artifacts
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.options import override_options
+from sentry.testutils.objectstore import artifact_bundles_test_both_backends
 from sentry.utils import json
 
 
@@ -44,6 +45,28 @@ class _ArtifactFile(TypedDict, total=False):
     type: str
     content: bytes
     headers: dict[str, str]
+
+
+@artifact_bundles_test_both_backends
+class ArtifactBundleStorageTest(TestCase):
+    def test_read_and_index(self) -> None:
+        bundle = self.create_artifact_bundle(org=self.organization)
+        with bundle.get_file() as contents:
+            payload = contents.read()
+            contents.seek(0)
+            assert contents.read() == payload
+        assert bundle.get_file_size() == len(payload)
+        assert bundle.get_checksum() == sha1(payload).hexdigest()
+        assert bundle.get_content_type() == "application/octet-stream"
+        assert bundle.get_date_created() is not None
+
+        index_urls_in_bundle(self.organization.id, bundle, None)
+        with ArtifactBundleArchive(BytesIO(payload)) as archive:
+            assert set(
+                ArtifactBundleIndex.objects.filter(artifact_bundle=bundle).values_list(
+                    "url", flat=True
+                )
+            ) == {info["url"] for info in archive.get_files().values() if info.get("url")}
 
 
 def make_compressed_zip_file(files: dict[str, _ArtifactFile]) -> bytes:

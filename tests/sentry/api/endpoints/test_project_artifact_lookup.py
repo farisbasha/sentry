@@ -8,6 +8,7 @@ from unittest import mock
 from uuid import uuid4
 
 import orjson
+import requests
 from django.core.files.base import ContentFile
 from django.urls import reverse
 
@@ -36,6 +37,7 @@ from sentry.testutils.cases import APITestCase
 from sentry.testutils.helpers.datetime import freeze_time
 from sentry.testutils.helpers.options import override_options
 from sentry.testutils.helpers.response import close_streaming_response
+from sentry.testutils.skips import requires_objectstore
 
 
 def make_file(
@@ -90,6 +92,67 @@ def upload_bundle(
         checksum=total_checksum,
         chunks=[blob1.checksum],
     )
+
+
+@requires_objectstore
+class ObjectstoreArtifactLookupTest(APITestCase):
+    endpoint = "sentry-api-0-project-artifact-lookup"
+
+    def create_bundle(self) -> ArtifactBundle:
+        bundle = self.create_artifact_bundle(org=self.organization, use_objectstore=True)
+        ProjectArtifactBundle.objects.create(
+            organization_id=self.organization.id,
+            project_id=self.project.id,
+            artifact_bundle=bundle,
+        )
+        self.login_as(self.user)
+        return bundle
+
+    def test_internal_redirect(self) -> None:
+        bundle = self.create_bundle()
+        with (
+            mock.patch("sentry.auth.system.is_internal_ip", return_value=True),
+            mock.patch("sentry.objectstore._IS_SYMBOLICATOR_CONTAINER", False),
+        ):
+            response = self.get_response(
+                self.organization.slug, self.project.slug, download=f"artifact_bundle/{bundle.id}"
+            )
+        assert response.status_code == 302
+        assert "/v1/objects/artifact_bundles/" in response["Location"]
+        downloaded = requests.get(response["Location"], timeout=10)
+        assert downloaded.status_code == 200
+        with bundle.get_file() as contents:
+            assert downloaded.content == contents.read()
+
+    def test_external_redirect(self) -> None:
+        bundle = self.create_bundle()
+        with mock.patch("sentry.auth.system.is_internal_ip", return_value=False):
+            response = self.get_response(
+                self.organization.slug, self.project.slug, download=f"artifact_bundle/{bundle.id}"
+            )
+        assert response.status_code == 302
+        assert f"/organizations/{self.organization.id}/objectstore/" in response["Location"]
+
+    def test_unassociated_project_cannot_download(self) -> None:
+        bundle = self.create_bundle()
+        other_project = self.create_project(organization=self.organization)
+        response = self.get_response(
+            self.organization.slug, other_project.slug, download=f"artifact_bundle/{bundle.id}"
+        )
+        assert response.status_code == 404
+
+    def test_download_requires_role(self) -> None:
+        bundle = self.create_bundle()
+        member = self.create_user()
+        self.create_member(
+            user=member, organization=self.organization, role="member", teams=[self.team]
+        )
+        self.project.update_option("sentry:debug_files_role", "owner")
+        self.login_as(member)
+        response = self.get_response(
+            self.organization.slug, self.project.slug, download=f"artifact_bundle/{bundle.id}"
+        )
+        assert response.status_code == 403
 
 
 class ArtifactLookupTest(APITestCase):

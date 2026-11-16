@@ -158,7 +158,7 @@ def index_urls_in_bundle(
 
     # We first open up the bundle and extract all the things we want to index from it.
     archive = existing_archive or ArtifactBundleArchive(
-        artifact_bundle.file.getfile(), build_memory_map=False
+        artifact_bundle.get_file(), build_memory_map=False
     )
     urls_to_index = []
     skipped_urls = 0

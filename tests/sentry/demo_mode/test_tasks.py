@@ -90,6 +90,20 @@ class SyncArtifactBundlesTest(TestCase):
 
         assert not ArtifactBundle.objects.all().exists()
 
+    @requires_objectstore
+    def test_sync_objectstore_artifact_bundle(self) -> None:
+        source = self.create_artifact_bundle(org=self.source_org, use_objectstore=True)
+        _sync_artifact_bundles(
+            source_org=self.source_org,
+            target_org=self.target_org,
+            cutoff_date=self.last_three_days(),
+        )
+        target = ArtifactBundle.objects.get(organization_id=self.target_org.id)
+        with source.get_file() as source_contents, target.get_file() as target_contents:
+            assert source_contents.read() == target_contents.read()
+        assert target.file_id is not None
+        assert target.storage_path is None
+
     def test_sync_artifact_bundles_with_differences(self) -> None:
         (source_artifact_bundle, _, __) = self.set_up_artifact_bundle(
             self.source_org, self.source_proj_foo

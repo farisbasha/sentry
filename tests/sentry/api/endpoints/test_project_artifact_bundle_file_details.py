@@ -7,13 +7,15 @@ from uuid import uuid4
 import orjson
 from django.urls import reverse
 
-from sentry.models.artifactbundle import ArtifactBundle, ProjectArtifactBundle
+from sentry.models.artifactbundle import ProjectArtifactBundle
 from sentry.models.files.file import File
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.factories import get_fixture_path
 from sentry.testutils.helpers.response import close_streaming_response
+from sentry.testutils.objectstore import artifact_bundles_test_both_backends
 
 
+@artifact_bundles_test_both_backends
 class ProjectArtifactBundleFileDetailsEndpointTest(APITestCase):
     @staticmethod
     def get_compressed_zip_file(
@@ -73,8 +75,8 @@ class ProjectArtifactBundleFileDetailsEndpointTest(APITestCase):
             },
         )
 
-        artifact_bundle = ArtifactBundle.objects.create(
-            organization_id=self.organization.id, bundle_id=uuid4(), file=file, artifact_count=2
+        artifact_bundle = self.create_artifact_bundle(
+            org=self.organization, bundle_id=uuid4(), file=file, artifact_count=2
         )
         ProjectArtifactBundle.objects.create(
             organization_id=self.organization.id,
@@ -244,8 +246,8 @@ class ProjectArtifactBundleFileDetailsEndpointTest(APITestCase):
             },
         )
 
-        artifact_bundle = ArtifactBundle.objects.create(
-            organization_id=self.organization.id, bundle_id=uuid4(), file=file, artifact_count=2
+        artifact_bundle = self.create_artifact_bundle(
+            org=self.organization, bundle_id=uuid4(), file=file, artifact_count=2
         )
 
         # Download as a superuser

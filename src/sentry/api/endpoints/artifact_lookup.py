@@ -9,6 +9,7 @@ from django.http import (
     HttpResponse,
     HttpResponseBadRequest,
     HttpResponseBase,
+    HttpResponseRedirect,
     StreamingHttpResponse,
 )
 from rest_framework.request import Request
@@ -63,7 +64,9 @@ class ProjectArtifactLookupEndpoint(ProjectEndpoint):
     }
     permission_classes = (ProjectReleasePermission,)
 
-    def download_file(self, download_id: str, project: Project) -> HttpResponseBase:
+    def download_file(
+        self, request: Request, download_id: str, project: Project
+    ) -> HttpResponseBase:
         split = download_id.split("/")
         if len(split) < 2:
             return HttpResponseBadRequest(content=b"Invalid download ID")
@@ -91,6 +94,7 @@ class ProjectArtifactLookupEndpoint(ProjectEndpoint):
             file_m = (
                 ArtifactBundle.objects.filter(
                     id=ty_id,
+                    organization_id=project.organization_id,
                     projectartifactbundle__project_id=project.id,
                 )
                 .select_related("file")
@@ -117,7 +121,11 @@ class ProjectArtifactLookupEndpoint(ProjectEndpoint):
 
         if file_m is None:
             raise Http404
+        if isinstance(file_m, ArtifactBundle) and file_m.storage_path is not None:
+            return HttpResponseRedirect(file_m.get_objectstore_presigned_url(request))
         file = file_m.file
+        if file is None:
+            raise Http404
 
         try:
             fp = file.getfile()
@@ -151,7 +159,7 @@ class ProjectArtifactLookupEndpoint(ProjectEndpoint):
         """
         if (download_id := request.GET.get("download")) is not None:
             if has_download_permission(request, project):
-                return self.download_file(download_id, project)
+                return self.download_file(request, download_id, project)
             else:
                 return Response(status=403)
 

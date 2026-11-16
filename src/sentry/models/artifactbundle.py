@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import logging
+import shutil
+import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
 from enum import Enum
+from functools import partial
 from types import TracebackType
 from typing import IO, Any, Self, cast
 
-from django.db import models
+from django.db import models, router, transaction
 from django.db.models.signals import post_delete
+from django.http import HttpRequest
 from django.utils import timezone
+from objectstore_client import Session
 from symbolic.debuginfo import normalize_debug_id
 from symbolic.exceptions import SymbolicError
 
@@ -20,6 +27,7 @@ from sentry.db.models import (
     Model,
     cell_silo_model,
 )
+from sentry.objectstore import UsecaseId, get_download_redirect_url, get_session
 from sentry.utils import json
 from sentry.utils.hashlib import sha1_text
 
@@ -30,6 +38,8 @@ NULL_STRING = ""
 
 # Must stay in sync with Symbolicator's `object_file_max_decompressed_source_size`
 MAX_SOURCE_FILE_SIZE = 1024 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 class SourceFileType(Enum):
@@ -71,7 +81,12 @@ class ArtifactBundle(Model):
     # We use 00000000-00000000-00000000-00000000 in place of NULL because the uniqueness constraint doesn't play well
     # with nullable fields, since NULL != NULL.
     bundle_id = models.UUIDField(default=NULL_UUID, db_index=True)
-    file = FlexibleForeignKey("sentry.File")
+    file = FlexibleForeignKey("sentry.File", null=True)
+    storage_path = models.TextField(null=True)
+    checksum = models.CharField(max_length=40, null=True)
+    content_type = models.TextField(null=True)
+    file_size = BoundedBigIntegerField(null=True)
+    date_created = models.DateTimeField(null=True)
     artifact_count = BoundedPositiveIntegerField()
     indexing_state = models.IntegerField(
         default=None, null=True, choices=ArtifactBundleIndexingState.choices()
@@ -88,6 +103,82 @@ class ArtifactBundle(Model):
     class Meta:
         app_label = "sentry"
         db_table = "sentry_artifactbundle"
+
+    def get_checksum(self) -> str | None:
+        if self.storage_path is not None:
+            return self.checksum
+        assert self.file is not None
+        return self.file.checksum
+
+    def get_content_type(self) -> str:
+        if self.storage_path is not None:
+            assert self.content_type is not None
+            return self.content_type
+        assert self.file is not None
+        return self.file.headers.get("Content-Type", "application/octet-stream")
+
+    def get_file_size(self) -> int:
+        if self.storage_path is not None:
+            size = self.file_size
+        else:
+            assert self.file is not None
+            size = self.file.size
+        assert size is not None
+        return size
+
+    def get_date_created(self) -> datetime:
+        if self.storage_path is not None:
+            date = self.date_created
+        else:
+            assert self.file is not None
+            date = self.file.timestamp
+        assert date is not None
+        return date
+
+    def get_objectstore_session(self) -> Session:
+        # Bundles can be associated with multiple projects in the organization.
+        return get_session(UsecaseId.ARTIFACT_BUNDLES, org=self.organization_id)
+
+    def get_file(self) -> IO[bytes]:
+        """Return a seekable file for reading the ZIP. The caller must close it."""
+        if self.storage_path is None:
+            assert self.file is not None
+            return self.file.getfile()
+
+        response = self.get_objectstore_session().get(self.storage_path)
+        if response is None:
+            raise FileNotFoundError("Artifact bundle does not exist in Objectstore")
+        # Objectstore returns a forward-only HTTP stream, but ZipFile needs to seek.
+        file = tempfile.TemporaryFile()
+        try:
+            with response.payload:
+                shutil.copyfileobj(response.payload, file)
+            file.seek(0)
+            return file
+        except BaseException:
+            file.close()
+            raise
+
+    def get_objectstore_presigned_url(self, request: HttpRequest) -> str:
+        if self.storage_path is None:
+            raise ValueError("Artifact bundle is not stored in Objectstore")
+        return get_download_redirect_url(
+            request, self.get_objectstore_session(), self.organization_id, self.storage_path
+        )
+
+    def delete_objectstore_file(self, storage_path: str) -> None:
+        # Keep the object if a surrounding database transaction rolls back.
+        transaction.on_commit(
+            partial(self._delete_objectstore_file, storage_path),
+            using=router.db_for_write(ArtifactBundle),
+        )
+
+    def _delete_objectstore_file(self, storage_path: str) -> None:
+        try:
+            self.get_objectstore_session().delete(storage_path)
+        except Exception:
+            # The object's TTI cleans up failed deletes, as for debug files.
+            logger.exception("artifact_bundle.objectstore_delete_failed")
 
     @classmethod
     def get_release_associations(
@@ -120,7 +211,7 @@ def delete_file_for_artifact_bundle(instance: ArtifactBundle, **kwargs: object) 
 
     checksum = None
     try:
-        checksum = instance.file.checksum
+        checksum = instance.get_checksum()
     except File.DoesNotExist:
         pass
     else:
@@ -133,9 +224,12 @@ def delete_file_for_artifact_bundle(instance: ArtifactBundle, **kwargs: object) 
 
     finally:
         try:
-            instance.file.delete()
+            if instance.file is not None:
+                instance.file.delete()
         except File.DoesNotExist:
             pass
+        if instance.storage_path is not None:
+            instance.delete_objectstore_file(instance.storage_path)
 
 
 post_delete.connect(delete_file_for_artifact_bundle, sender=ArtifactBundle)

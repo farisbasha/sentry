@@ -607,7 +607,7 @@ class ReleaseLookupData:
         for possible_release_artifact_bundle in possible_release_artifact_bundles:
             if possible_release_artifact_bundle.dist_name == (self.event.dist or ""):
                 with ArtifactBundleArchive(
-                    possible_release_artifact_bundle.artifact_bundle.file.getfile()
+                    possible_release_artifact_bundle.artifact_bundle.get_file()
                 ) as archive:
                     archive_urls = archive.get_all_urls()
                     for potential_source_file_name in self.matching_source_file_names:
