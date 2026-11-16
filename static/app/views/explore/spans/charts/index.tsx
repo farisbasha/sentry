@@ -8,6 +8,7 @@ import {IconGraph} from '@sentry/icons/graph';
 import {Button} from '@sentry/scraps/button';
 import {Chip} from '@sentry/scraps/chip';
 import {CompactSelect} from '@sentry/scraps/compactSelect';
+import {getDuration} from '@sentry/scraps/duration';
 import {Container, Flex, type ContainerProps} from '@sentry/scraps/layout';
 import {OverlayTrigger} from '@sentry/scraps/overlayTrigger';
 import {Tooltip} from '@sentry/scraps/tooltip';
@@ -20,7 +21,6 @@ import {usePageFilters} from 'sentry/components/pageFilters/usePageFilters';
 import {t} from 'sentry/locale';
 import type {ReactEchartsRef} from 'sentry/types/echarts';
 import {defined} from 'sentry/utils/defined';
-import {getDuration} from 'sentry/utils/duration/getDuration';
 import {determineSeriesSampleCountAndIsSampled} from 'sentry/utils/timeSeries/determineSeriesSampleCount';
 import {getTimeSeriesForQuery} from 'sentry/utils/timeSeries/getTimeSeriesForQuery';
 import {useChartInterval} from 'sentry/utils/useChartInterval';
@@ -441,8 +441,8 @@ function Chart({
   } else if (areHeatMapOutliersHidden) {
     outlierToggleTooltip = t(
       'Spans outside %s - %s (fastest span to estimated p99.9 over the last hour) are hidden. Click to show them.',
-      getDuration(heatMapOutlierBounds.yMin / 1000, 2, true),
-      getDuration(heatMapOutlierBounds.yMax / 1000, 2, true)
+      getDuration(heatMapOutlierBounds.yMin / 1000, {precision: 2, style: 'short'}),
+      getDuration(heatMapOutlierBounds.yMax / 1000, {precision: 2, style: 'short'})
     );
   } else {
     outlierToggleTooltip = t('Click to hide outliers.');
