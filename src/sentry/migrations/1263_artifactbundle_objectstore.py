@@ -24,7 +24,7 @@ class Migration(CheckedMigration):
     is_post_deployment = False
 
     dependencies = [
-        ("sentry", "1261_add_projectartifactbundle_debug_ids_index"),
+        ("sentry", "1262_remove_gal_project_option_value_id_index"),
     ]
 
     operations = [
