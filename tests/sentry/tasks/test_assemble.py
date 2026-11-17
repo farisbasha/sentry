@@ -271,8 +271,8 @@ class AssembleArtifactsTest(BaseAssembleTest):
             )
         bundle.refresh_from_db()
         assert bundle.storage_path is None
-        assert bundle.file_id is not None
-        with bundle.get_file() as contents:
+        assert bundle.file is not None
+        with bundle.file.getfile() as contents:
             assert contents.read() == payload
         assert session.get(key) is None
 

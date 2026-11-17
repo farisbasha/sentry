@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from hashlib import sha1
 from unittest import mock
 from uuid import uuid1
 
@@ -99,9 +100,9 @@ class SyncArtifactBundlesTest(TestCase):
             cutoff_date=self.last_three_days(),
         )
         target = ArtifactBundle.objects.get(organization_id=self.target_org.id)
-        with source.get_file() as source_contents, target.get_file() as target_contents:
-            assert source_contents.read() == target_contents.read()
-        assert target.file_id is not None
+        assert target.file is not None
+        with target.file.getfile() as target_contents:
+            assert sha1(target_contents.read()).hexdigest() == source.get_checksum()
         assert target.storage_path is None
 
     @requires_objectstore
@@ -122,8 +123,9 @@ class SyncArtifactBundlesTest(TestCase):
         assert isinstance(capture_exception.call_args.args[0], FileNotFoundError)
         target = ArtifactBundle.objects.get(organization_id=self.target_org.id)
         assert target.bundle_id == source.bundle_id
-        with source.get_file() as source_contents, target.get_file() as target_contents:
-            assert source_contents.read() == target_contents.read()
+        assert target.file is not None
+        with target.file.getfile() as target_contents:
+            assert sha1(target_contents.read()).hexdigest() == source.get_checksum()
 
     def test_sync_artifact_bundles_with_differences(self) -> None:
         (source_artifact_bundle, _, __) = self.set_up_artifact_bundle(

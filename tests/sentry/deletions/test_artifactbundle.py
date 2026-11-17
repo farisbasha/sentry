@@ -38,8 +38,8 @@ class DeleteArtifactBundleTest(TransactionTestCase, HybridCloudTestMixin):
             bundle.delete()
             raise RuntimeError("Roll back deletion")
         surviving_bundle = ArtifactBundle.objects.get(id=bundle_id)
-        with surviving_bundle.get_file() as contents:
-            assert contents.read()
+        with surviving_bundle.get_archive() as archive:
+            assert archive.get_files()
 
     @requires_objectstore
     def test_objectstore_cleanup(self) -> None:

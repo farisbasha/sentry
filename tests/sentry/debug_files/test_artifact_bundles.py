@@ -55,9 +55,12 @@ class _ArtifactFile(TypedDict, total=False):
 @artifact_bundles_test_both_backends
 class ArtifactBundleStorageTest(TestCase):
     def test_read_and_index(self) -> None:
-        bundle = self.create_artifact_bundle(org=self.organization)
-        with bundle.get_file() as contents:
-            payload = contents.read()
+        payload = self.create_artifact_bundle_zip(
+            self.organization.slug, fixture_path="artifact_bundle_debug_ids"
+        )
+        file = self.create_file(name="artifact-bundle.zip")
+        file.putfile(ContentFile(payload))
+        bundle = self.create_artifact_bundle(org=self.organization, file=file)
         assert bundle.get_file_size() == len(payload)
         assert bundle.get_checksum() == sha1(payload).hexdigest()
         assert bundle.get_content_type() == "application/octet-stream"
@@ -72,21 +75,7 @@ class ArtifactBundleStorageTest(TestCase):
             ) == {info["url"] for info in archive.get_files().values() if info.get("url")}
 
 
-class ArtifactBundleStreamTest(TestCase):
-    def test_get_file_returns_unread_objectstore_stream(self) -> None:
-        bundle = self.create_artifact_bundle(self.organization)
-        bundle.storage_path = "objectstore-bundle"
-        payload = BytesIO(b"bundle contents")
-
-        with patch.object(ArtifactBundle, "get_objectstore_session") as get_session:
-            get_session.return_value.get.return_value.payload = payload
-            with bundle.get_file() as contents:
-                assert contents is payload
-                assert payload.tell() == 0
-                assert contents.read() == b"bundle contents"
-
-        assert payload.closed
-
+class ArtifactBundleArchiveTest(TestCase):
     def test_invalid_archive_closes_stream_and_temporary_file(self) -> None:
         bundle = self.create_artifact_bundle(self.organization)
         bundle.storage_path = "objectstore-bundle"

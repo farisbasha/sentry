@@ -140,25 +140,18 @@ class ArtifactBundle(Model):
         # Bundles can be associated with multiple projects in the organization.
         return get_session(UsecaseId.ARTIFACT_BUNDLES, org=self.organization_id)
 
-    def get_file(self) -> IO[bytes]:
-        """Return the contents as a file-like object. The caller must close it."""
-        if self.storage_path is None:
-            assert self.file is not None
-            return self.file.getfile()
-
-        response = self.get_objectstore_session().get(self.storage_path)
-        if response is None:
-            raise FileNotFoundError("Artifact bundle does not exist in Objectstore")
-        return response.payload
-
     def get_archive(self, build_memory_map: bool = True) -> ArtifactBundleArchive:
         """Open the ZIP, buffering Objectstore streams for seeking. The caller must close it."""
         with ExitStack() as stack:
             if self.storage_path is None:
-                contents = stack.enter_context(self.get_file())
+                assert self.file is not None
+                contents = stack.enter_context(self.file.getfile())
             else:
                 contents = stack.enter_context(tempfile.TemporaryFile())
-                with self.get_file() as stream:
+                response = self.get_objectstore_session().get(self.storage_path)
+                if response is None:
+                    raise FileNotFoundError("Artifact bundle does not exist in Objectstore")
+                with response.payload as stream:
                     shutil.copyfileobj(stream, contents)
                 contents.seek(0)
 

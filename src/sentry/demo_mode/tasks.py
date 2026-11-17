@@ -162,7 +162,12 @@ def _sync_artifact_bundle(source_artifact_bundle: ArtifactBundle, target_org: Or
                     type="artifact.bundle",
                     headers={"Content-Type": source_artifact_bundle.get_content_type()},
                 )
-                with source_artifact_bundle.get_file() as contents:
+                response = source_artifact_bundle.get_objectstore_session().get(
+                    source_artifact_bundle.storage_path
+                )
+                if response is None:
+                    raise FileNotFoundError("Artifact bundle does not exist in Objectstore")
+                with response.payload as contents:
                     file.putfile(contents)
             assert file is not None
             blobs = file.blobs.all()

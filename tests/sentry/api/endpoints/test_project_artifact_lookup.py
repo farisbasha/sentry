@@ -121,8 +121,7 @@ class ObjectstoreArtifactLookupTest(APITestCase):
         assert "/v1/objects/artifact_bundles/" in response["Location"]
         downloaded = requests.get(response["Location"], timeout=10)
         assert downloaded.status_code == 200
-        with bundle.get_file() as contents:
-            assert downloaded.content == contents.read()
+        assert sha1(downloaded.content).hexdigest() == bundle.get_checksum()
 
     def test_external_redirect(self) -> None:
         bundle = self.create_bundle()
