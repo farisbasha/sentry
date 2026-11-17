@@ -157,9 +157,7 @@ def index_urls_in_bundle(
     skip_debug_id_names = options.get("sourcemaps.artifact-bundles.index-skip-debug-id-names")
 
     # We first open up the bundle and extract all the things we want to index from it.
-    archive = existing_archive or ArtifactBundleArchive(
-        artifact_bundle.get_file(), build_memory_map=False
-    )
+    archive = existing_archive or artifact_bundle.get_archive(build_memory_map=False)
     urls_to_index = []
     skipped_urls = 0
     try:

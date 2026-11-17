@@ -16,7 +16,7 @@ from sentry.api.paginator import ChainPaginator
 from sentry.api.serializers import serialize
 from sentry.api.serializers.models.artifactbundle import ArtifactBundleFilesSerializer
 from sentry.constants import MAX_ARTIFACT_BUNDLE_FILES_OFFSET
-from sentry.models.artifactbundle import ArtifactBundle, ArtifactBundleArchive
+from sentry.models.artifactbundle import ArtifactBundle
 from sentry.models.project import Project
 from sentry.ratelimits.config import SENTRY_RATELIMITER_GROUP_DEFAULTS, RateLimitConfig
 
@@ -98,7 +98,7 @@ class ProjectArtifactBundleFilesEndpoint(ProjectEndpoint):
 
         try:
             # We open the archive to fetch the number of files.
-            archive = ArtifactBundleArchive(artifact_bundle.get_file(), build_memory_map=False)
+            archive = artifact_bundle.get_archive(build_memory_map=False)
         except Exception:
             return Response(
                 {"error": f"The archive of artifact bundle {bundle_id} can't be opened"}

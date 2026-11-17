@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import ExitStack
 from datetime import datetime
 from enum import Enum
 from functools import partial
@@ -140,7 +141,7 @@ class ArtifactBundle(Model):
         return get_session(UsecaseId.ARTIFACT_BUNDLES, org=self.organization_id)
 
     def get_file(self) -> IO[bytes]:
-        """Return a seekable file for reading the ZIP. The caller must close it."""
+        """Return the contents as a file-like object. The caller must close it."""
         if self.storage_path is None:
             assert self.file is not None
             return self.file.getfile()
@@ -148,16 +149,23 @@ class ArtifactBundle(Model):
         response = self.get_objectstore_session().get(self.storage_path)
         if response is None:
             raise FileNotFoundError("Artifact bundle does not exist in Objectstore")
-        # Objectstore returns a forward-only HTTP stream, but ZipFile needs to seek.
-        file = tempfile.TemporaryFile()
-        try:
-            with response.payload:
-                shutil.copyfileobj(response.payload, file)
-            file.seek(0)
-            return file
-        except BaseException:
-            file.close()
-            raise
+        return response.payload
+
+    def get_archive(self, build_memory_map: bool = True) -> ArtifactBundleArchive:
+        """Open the ZIP, buffering Objectstore streams for seeking. The caller must close it."""
+        with ExitStack() as stack:
+            if self.storage_path is None:
+                contents = stack.enter_context(self.get_file())
+            else:
+                contents = stack.enter_context(tempfile.TemporaryFile())
+                with self.get_file() as stream:
+                    shutil.copyfileobj(stream, contents)
+                contents.seek(0)
+
+            archive = ArtifactBundleArchive(contents, build_memory_map=build_memory_map)
+            # The archive owns the file after construction succeeds.
+            stack.pop_all()
+            return archive
 
     def get_objectstore_presigned_url(self, request: HttpRequest) -> str:
         if self.storage_path is None:

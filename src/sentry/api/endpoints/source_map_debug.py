@@ -601,9 +601,7 @@ class ReleaseLookupData:
             self.source_file_lookup_result = "wrong-dist"
         for possible_release_artifact_bundle in possible_release_artifact_bundles:
             if possible_release_artifact_bundle.dist_name == (self.event.dist or ""):
-                with ArtifactBundleArchive(
-                    possible_release_artifact_bundle.artifact_bundle.get_file()
-                ) as archive:
+                with possible_release_artifact_bundle.artifact_bundle.get_archive() as archive:
                     archive_urls = archive.get_all_urls()
                     for potential_source_file_name in self.matching_source_file_names:
                         if potential_source_file_name in archive_urls:

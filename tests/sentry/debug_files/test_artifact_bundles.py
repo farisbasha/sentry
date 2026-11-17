@@ -3,9 +3,11 @@ import zipfile
 from datetime import datetime, timedelta
 from hashlib import sha1
 from io import BytesIO
+from tempfile import TemporaryFile
 from typing import Literal, TypedDict
 from unittest.mock import patch
 
+import pytest
 from django.core.files.base import ContentFile
 from django.db import connections, router
 from django.test.utils import CaptureQueriesContext
@@ -56,20 +58,53 @@ class ArtifactBundleStorageTest(TestCase):
         bundle = self.create_artifact_bundle(org=self.organization)
         with bundle.get_file() as contents:
             payload = contents.read()
-            contents.seek(0)
-            assert contents.read() == payload
         assert bundle.get_file_size() == len(payload)
         assert bundle.get_checksum() == sha1(payload).hexdigest()
         assert bundle.get_content_type() == "application/octet-stream"
         assert bundle.get_date_created() is not None
 
         index_urls_in_bundle(self.organization.id, bundle, None)
-        with ArtifactBundleArchive(BytesIO(payload)) as archive:
+        with bundle.get_archive() as archive:
             assert set(
                 ArtifactBundleIndex.objects.filter(artifact_bundle=bundle).values_list(
                     "url", flat=True
                 )
             ) == {info["url"] for info in archive.get_files().values() if info.get("url")}
+
+
+class ArtifactBundleStreamTest(TestCase):
+    def test_get_file_returns_unread_objectstore_stream(self) -> None:
+        bundle = self.create_artifact_bundle(self.organization)
+        bundle.storage_path = "objectstore-bundle"
+        payload = BytesIO(b"bundle contents")
+
+        with patch.object(ArtifactBundle, "get_objectstore_session") as get_session:
+            get_session.return_value.get.return_value.payload = payload
+            with bundle.get_file() as contents:
+                assert contents is payload
+                assert payload.tell() == 0
+                assert contents.read() == b"bundle contents"
+
+        assert payload.closed
+
+    def test_invalid_archive_closes_stream_and_temporary_file(self) -> None:
+        bundle = self.create_artifact_bundle(self.organization)
+        bundle.storage_path = "objectstore-bundle"
+        payload = BytesIO(b"invalid zip")
+
+        with (
+            TemporaryFile() as temporary_file,
+            patch.object(ArtifactBundle, "get_objectstore_session") as get_session,
+            patch(
+                "sentry.models.artifactbundle.tempfile.TemporaryFile", return_value=temporary_file
+            ),
+        ):
+            get_session.return_value.get.return_value.payload = payload
+            with pytest.raises(zipfile.BadZipFile):
+                bundle.get_archive()
+
+            assert payload.closed
+            assert temporary_file.closed
 
 
 def make_compressed_zip_file(files: dict[str, _ArtifactFile]) -> bytes:

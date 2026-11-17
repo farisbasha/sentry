@@ -105,7 +105,7 @@ class ProjectArtifactBundleFileDetailsEndpoint(
             )
 
         try:
-            archive = ArtifactBundleArchive(artifact_bundle.get_file(), build_memory_map=False)
+            archive = artifact_bundle.get_archive(build_memory_map=False)
         except Exception as exc:
             sentry_sdk.capture_exception(exc)
             return Response(
