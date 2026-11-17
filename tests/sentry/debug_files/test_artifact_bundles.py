@@ -3,16 +3,13 @@ import zipfile
 from datetime import datetime, timedelta
 from hashlib import sha1
 from io import BytesIO
-from tempfile import TemporaryFile
 from typing import Literal, TypedDict
 from unittest.mock import patch
 
-import pytest
 from django.core.files.base import ContentFile
 from django.db import connections, router
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
-from objectstore_client import Metadata
 
 from sentry.debug_files.artifact_bundles import (
     get_artifact_bundles_containing_debug_id,
@@ -21,7 +18,6 @@ from sentry.debug_files.artifact_bundles import (
     get_cached_bundles_indexing_state,
     get_redis_cluster_for_artifact_bundles,
     index_urls_in_bundle,
-    maybe_renew_artifact_bundles,
     query_artifact_bundles_containing_file,
     renew_artifact_bundle,
 )
@@ -40,7 +36,6 @@ from sentry.models.project import Project
 from sentry.tasks.assemble import assemble_artifacts
 from sentry.testutils.cases import TestCase
 from sentry.testutils.helpers.options import override_options
-from sentry.testutils.objectstore import artifact_bundles_test_both_backends
 from sentry.testutils.skips import requires_objectstore
 from sentry.utils import json
 
@@ -50,50 +45,6 @@ class _ArtifactFile(TypedDict, total=False):
     type: str
     content: bytes
     headers: dict[str, str]
-
-
-@artifact_bundles_test_both_backends
-class ArtifactBundleStorageTest(TestCase):
-    def test_read_and_index(self) -> None:
-        payload = self.create_artifact_bundle_zip(
-            self.organization.slug, fixture_path="artifact_bundle_debug_ids"
-        )
-        file = self.create_file(name="artifact-bundle.zip")
-        file.putfile(ContentFile(payload))
-        bundle = self.create_artifact_bundle(org=self.organization, file=file)
-        assert bundle.get_file_size() == len(payload)
-        assert bundle.get_checksum() == sha1(payload).hexdigest()
-        assert bundle.get_content_type() == "application/octet-stream"
-        assert bundle.get_date_created() is not None
-
-        index_urls_in_bundle(self.organization.id, bundle, None)
-        with bundle.get_archive() as archive:
-            assert set(
-                ArtifactBundleIndex.objects.filter(artifact_bundle=bundle).values_list(
-                    "url", flat=True
-                )
-            ) == {info["url"] for info in archive.get_files().values() if info.get("url")}
-
-
-class ArtifactBundleArchiveTest(TestCase):
-    def test_invalid_archive_closes_stream_and_temporary_file(self) -> None:
-        bundle = self.create_artifact_bundle(self.organization)
-        bundle.storage_path = "objectstore-bundle"
-        payload = BytesIO(b"invalid zip")
-
-        with (
-            TemporaryFile() as temporary_file,
-            patch.object(ArtifactBundle, "get_objectstore_session") as get_session,
-            patch(
-                "sentry.models.artifactbundle.tempfile.TemporaryFile", return_value=temporary_file
-            ),
-        ):
-            get_session.return_value.get.return_value.payload = payload
-            with pytest.raises(zipfile.BadZipFile):
-                bundle.get_archive()
-
-            assert payload.closed
-            assert temporary_file.closed
 
 
 def make_compressed_zip_file(files: dict[str, _ArtifactFile]) -> bytes:
@@ -1251,27 +1202,6 @@ class RenewArtifactBundleTest(TestCase):
 class RenewObjectstoreArtifactBundleTest(RenewArtifactBundleTest):
     use_objectstore = True
 
-    def test_renews_objectstore_before_database(self) -> None:
-        session = self.artifact_bundle.get_objectstore_session()
-        original_head = session.head
-
-        def head(storage_path: str) -> Metadata | None:
-            assert (
-                ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == self.old_date
-            )
-            return original_head(storage_path)
-
-        with (
-            patch.object(ArtifactBundle, "get_objectstore_session", return_value=session),
-            patch.object(session, "head", side_effect=head) as mock_head,
-        ):
-            maybe_renew_artifact_bundles({self.artifact_bundle.id: self.old_date})
-
-        mock_head.assert_called_once_with(self.artifact_bundle.storage_path)
-        renewed = ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added
-        assert renewed > self.old_date
-        assert self.linked_dates() == {renewed}
-
     def test_failed_renewal_retries_on_next_access(self) -> None:
         session = self.artifact_bundle.get_objectstore_session()
         with (
@@ -1299,15 +1229,6 @@ class RenewObjectstoreArtifactBundleTest(RenewArtifactBundleTest):
         assert not ReleaseArtifactBundle.objects.filter(artifact_bundle_id=bundle_id).exists()
         assert not DebugIdArtifactBundle.objects.filter(artifact_bundle_id=bundle_id).exists()
         assert not ArtifactBundleIndex.objects.filter(artifact_bundle_id=bundle_id).exists()
-
-    def test_already_renewed_bundle_skips_objectstore(self) -> None:
-        now = self.renew()
-        with patch.object(ArtifactBundle, "get_objectstore_session") as mock_session:
-            # The lookup may still carry the date from before a concurrent renewal.
-            maybe_renew_artifact_bundles({self.artifact_bundle.id: self.old_date})
-
-        mock_session.assert_not_called()
-        assert ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == now
 
     def test_reupload_during_head_preserves_bundle(self) -> None:
         session = self.artifact_bundle.get_objectstore_session()

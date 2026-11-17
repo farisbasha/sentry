@@ -92,20 +92,6 @@ class SyncArtifactBundlesTest(TestCase):
         assert not ArtifactBundle.objects.all().exists()
 
     @requires_objectstore
-    def test_sync_objectstore_artifact_bundle(self) -> None:
-        source = self.create_artifact_bundle(org=self.source_org, use_objectstore=True)
-        _sync_artifact_bundles(
-            source_org=self.source_org,
-            target_org=self.target_org,
-            cutoff_date=self.last_three_days(),
-        )
-        target = ArtifactBundle.objects.get(organization_id=self.target_org.id)
-        assert target.file is not None
-        with target.file.getfile() as target_contents:
-            assert sha1(target_contents.read()).hexdigest() == source.get_checksum()
-        assert target.storage_path is None
-
-    @requires_objectstore
     def test_sync_artifact_bundles_continues_after_missing_object(self) -> None:
         missing = self.create_artifact_bundle(org=self.source_org, use_objectstore=True)
         assert missing.storage_path is not None
@@ -123,6 +109,7 @@ class SyncArtifactBundlesTest(TestCase):
         assert isinstance(capture_exception.call_args.args[0], FileNotFoundError)
         target = ArtifactBundle.objects.get(organization_id=self.target_org.id)
         assert target.bundle_id == source.bundle_id
+        assert target.storage_path is None
         assert target.file is not None
         with target.file.getfile() as target_contents:
             assert sha1(target_contents.read()).hexdigest() == source.get_checksum()

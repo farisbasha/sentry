@@ -15,11 +15,13 @@ def artifact_bundles_test_both_backends[T: type](cls: T) -> T:
     for attr_name in list(vars(cls)):
         if attr_name.startswith("test_") and callable(getattr(cls, attr_name)):
             method = getattr(cls, attr_name)
-            setattr(cls, f"{attr_name}_objectstore", _wrap_artifact_bundle_test(method))
+            setattr(cls, f"{attr_name}_objectstore", artifact_bundles_objectstore_variant(method))
     return cls
 
 
-def _wrap_artifact_bundle_test(func: Callable[..., Any]) -> Callable[..., Any]:
+def artifact_bundles_objectstore_variant(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a test with factory-created bundles in Objectstore."""
+
     @wraps(func)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> None:
         token = artifact_bundles_use_objectstore.set(True)

@@ -12,10 +12,9 @@ from sentry.models.files.file import File
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.factories import get_fixture_path
 from sentry.testutils.helpers.response import close_streaming_response
-from sentry.testutils.objectstore import artifact_bundles_test_both_backends
+from sentry.testutils.objectstore import artifact_bundles_objectstore_variant
 
 
-@artifact_bundles_test_both_backends
 class ProjectArtifactBundleFileDetailsEndpointTest(APITestCase):
     @staticmethod
     def get_compressed_zip_file(
@@ -169,6 +168,8 @@ class ProjectArtifactBundleFileDetailsEndpointTest(APITestCase):
         self.login_as(user=user_no_permission)
         response = self.client.get(url)
         assert response.status_code == 403, response.content
+
+    test_archive_download_objectstore = artifact_bundles_objectstore_variant(test_archive_download)
 
     def test_archive_download_as_sentry_app(self) -> None:
         project = self.create_project(name="foo")

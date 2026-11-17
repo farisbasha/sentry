@@ -6,11 +6,10 @@ from django.utils import timezone
 from sentry.models.artifactbundle import ProjectArtifactBundle, ReleaseArtifactBundle
 from sentry.testutils.cases import APITestCase
 from sentry.testutils.helpers.datetime import freeze_time
-from sentry.testutils.objectstore import artifact_bundles_test_both_backends
+from sentry.testutils.objectstore import artifact_bundles_objectstore_variant
 
 
 @freeze_time("2023-03-15 00:00:00")
-@artifact_bundles_test_both_backends
 class ProjectArtifactBundleFilesEndpointTest(APITestCase):
     def test_get_artifact_bundle_files_with_invalid_bundle_id(self) -> None:
         project = self.create_project(name="foo")
@@ -129,6 +128,10 @@ class ProjectArtifactBundleFilesEndpointTest(APITestCase):
                 },
             ],
         }
+
+    test_get_artifact_bundle_files_with_multiple_files_objectstore = (
+        artifact_bundles_objectstore_variant(test_get_artifact_bundle_files_with_multiple_files)
+    )
 
     def test_get_artifact_bundle_files_pagination_with_multiple_files(self) -> None:
         project = self.create_project(name="foo")

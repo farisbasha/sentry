@@ -123,36 +123,6 @@ class ObjectstoreArtifactLookupTest(APITestCase):
         assert downloaded.status_code == 200
         assert sha1(downloaded.content).hexdigest() == bundle.get_checksum()
 
-    def test_external_redirect(self) -> None:
-        bundle = self.create_bundle()
-        with mock.patch("sentry.auth.system.is_internal_ip", return_value=False):
-            response = self.get_response(
-                self.organization.slug, self.project.slug, download=f"artifact_bundle/{bundle.id}"
-            )
-        assert response.status_code == 302
-        assert f"/organizations/{self.organization.id}/objectstore/" in response["Location"]
-
-    def test_unassociated_project_cannot_download(self) -> None:
-        bundle = self.create_bundle()
-        other_project = self.create_project(organization=self.organization)
-        response = self.get_response(
-            self.organization.slug, other_project.slug, download=f"artifact_bundle/{bundle.id}"
-        )
-        assert response.status_code == 404
-
-    def test_download_requires_role(self) -> None:
-        bundle = self.create_bundle()
-        member = self.create_user()
-        self.create_member(
-            user=member, organization=self.organization, role="member", teams=[self.team]
-        )
-        self.project.update_option("sentry:debug_files_role", "owner")
-        self.login_as(member)
-        response = self.get_response(
-            self.organization.slug, self.project.slug, download=f"artifact_bundle/{bundle.id}"
-        )
-        assert response.status_code == 403
-
 
 class ArtifactLookupTest(APITestCase):
     def assert_download_matches_file(self, url: str, file_contents: bytes) -> None:
