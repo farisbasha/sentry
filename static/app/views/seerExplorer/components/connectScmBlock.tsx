@@ -1,4 +1,4 @@
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import {useQuery} from '@tanstack/react-query';
 import {motion} from 'framer-motion';
 
@@ -8,9 +8,11 @@ import {Input} from '@sentry/scraps/input';
 import {Container, Stack} from '@sentry/scraps/layout';
 import {Text} from '@sentry/scraps/text';
 
+import {Placeholder} from 'sentry/components/placeholder';
 import {t} from 'sentry/locale';
 import {apiOptions} from 'sentry/utils/api/apiOptions';
 import {useOrganization} from 'sentry/utils/useOrganization';
+import {useTimeout} from 'sentry/utils/useTimeout';
 import type {
   ConnectScmData,
   PendingUserInput,
@@ -18,8 +20,8 @@ import type {
 } from 'sentry/views/seerExplorer/types';
 
 // The fix usually lands a few seconds after the user makes it (a webhook, then a sync job), and
-// the slowest normal path (a sync retrying) takes about 6 minutes. After that, only coming back
-// to the tab checks again.
+// the slowest normal path (a sync retrying) takes about 6 minutes. After that it stops, until the
+// user refreshes the page.
 const POLL_INTERVAL_MS = 5_000;
 const POLL_FOR_MS = 10 * 60_000;
 
@@ -145,8 +147,8 @@ interface ConnectScmBlockProps {
 /**
  * The prompt above the composer while a run waits on a repo it couldn't open. What it shows
  * comes from Sentry's answer to "can Seer open this repo now?", which it checks until the answer
- * is yes. Until this pause's first answer, or if checking fails, it shows the run's
- * error. The run resumes on one of its actions or on the user's next message.
+ * is yes. Until this pause's first answer it shows that it's checking, and if checking fails,
+ * it shows the run's error. The run resumes on one of its actions or on the user's next message.
  */
 export function ConnectScmBlock({
   pendingInput,
@@ -161,7 +163,18 @@ export function ConnectScmBlock({
   // The cache can hold an answer from an earlier pause for this repo, which this pause's failure
   // may contradict, so only answers from after this one opened count.
   const isCurrent = (dataUpdatedAt: number) => dataUpdatedAt >= shownAt;
-  const {data: latestAccess, dataUpdatedAt} = useQuery({
+  // Whether to keep checking: for POLL_FOR_MS after the popup opens.
+  const [isWatching, setIsWatching] = useState(true);
+  const {start: startWatching} = useTimeout({
+    timeMs: POLL_FOR_MS,
+    onTimeout: () => setIsWatching(false),
+  });
+  const {
+    data: latestAccess,
+    dataUpdatedAt,
+    errorUpdatedAt,
+    isError,
+  } = useQuery({
     ...apiOptions.as<RepoAccess>()(
       '/organizations/$organizationIdOrSlug/seer/repo-access/',
       {
@@ -176,20 +189,48 @@ export function ConnectScmBlock({
       const status = isCurrent(query.state.dataUpdatedAt)
         ? query.state.data?.json.status
         : undefined;
-      if ((status && isSettled(status)) || Date.now() - shownAt > POLL_FOR_MS) {
+      if (!isWatching || (status && isSettled(status))) {
         return false;
       }
       return POLL_INTERVAL_MS;
     },
   });
 
+  useEffect(() => {
+    startWatching();
+  }, [startWatching]);
+
   const checkedAccess = isCurrent(dataUpdatedAt) ? latestAccess : undefined;
+  const checkFailed = isError && isCurrent(errorUpdatedAt);
+  // No answer for this pause yet, so whatever was wrong may already be fixed.
+  const isChecking = !checkedAccess && !checkFailed;
   const access: RepoAccess = checkedAccess ?? {
     status: data.failure_reason,
     connectedAccounts: [],
   };
   const problem = getProblem(access, organization.slug);
   const found = isFound(access.status);
+  const stoppedWatching = !isWatching && !isSettled(access.status);
+
+  if (isChecking) {
+    return (
+      <Container padding="0 xl">
+        <motion.div initial={{opacity: 0, y: 10}} animate={{opacity: 1, y: 0}}>
+          <Alert variant="muted">
+            <Stack gap="lg">
+              <Stack gap="xs">
+                <Text bold>
+                  {t('Checking whether Seer can access %s', data.repo_name)}
+                </Text>
+                <Placeholder height="1em" width="80%" testId="repo-access-checking" />
+              </Stack>
+              <Placeholder height="28px" width="160px" />
+            </Stack>
+          </Alert>
+        </motion.div>
+      </Container>
+    );
+  }
 
   return (
     <Container padding="0 xl">
@@ -210,6 +251,11 @@ export function ConnectScmBlock({
                         "Sentry can't tell what's wrong. Check the repo name, or continue and Seer will try again."
                       ))}
               </Text>
+              {stoppedWatching && (
+                <Text size="sm" variant="muted">
+                  {t('Stopped checking. Refresh the page to check again.')}
+                </Text>
+              )}
             </Stack>
             {isCorrecting ? (
               <CorrectRepoForm

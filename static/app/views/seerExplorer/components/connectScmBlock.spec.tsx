@@ -46,6 +46,23 @@ describe('ConnectScmBlock', () => {
     return respondToUserInput;
   }
 
+  it('shows that it is checking until the first answer', async () => {
+    mockRepoAccess('repo_not_in_sentry');
+    renderBlock({failureReason: 'repo_not_in_sentry'});
+
+    expect(
+      screen.getByText('Checking whether Seer can access acme/app')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {name: 'Continue without code'})
+    ).not.toBeInTheDocument();
+
+    expect(await screen.findByText("Seer can't access acme/app")).toBeInTheDocument();
+    expect(
+      screen.queryByText('Checking whether Seer can access acme/app')
+    ).not.toBeInTheDocument();
+  });
+
   it('links to integrations when nothing is connected', async () => {
     mockRepoAccess('no_scm_integration');
     renderBlock();
@@ -133,13 +150,12 @@ describe('ConnectScmBlock', () => {
     const check = MockApiClient.addMockResponse({url: REPO_ACCESS_URL, statusCode: 500});
     renderBlock({failureReason: 'repo_not_in_sentry'});
 
-    await act(() => Promise.resolve());
-    expect(check).toHaveBeenCalled();
     expect(
-      screen.getByText(
+      await screen.findByText(
         "This repo isn't in Sentry. Check its name, and that Sentry has access to it."
       )
     ).toBeInTheDocument();
+    expect(check).toHaveBeenCalled();
     expect(
       screen.getByRole('button', {name: 'Continue without code'})
     ).toBeInTheDocument();
@@ -152,7 +168,8 @@ describe('ConnectScmBlock', () => {
 
     afterEach(() => {
       try {
-        jest.runOnlyPendingTimers();
+        // The popup's own timers update its state.
+        act(() => jest.runOnlyPendingTimers());
       } finally {
         jest.useRealTimers();
       }
@@ -185,6 +202,9 @@ describe('ConnectScmBlock', () => {
       await act(() => jest.advanceTimersByTimeAsync(60_000));
 
       expect(check).toHaveBeenCalledTimes(checks);
+      expect(
+        screen.getByText('Stopped checking. Refresh the page to check again.')
+      ).toBeInTheDocument();
     });
   });
 
@@ -195,7 +215,8 @@ describe('ConnectScmBlock', () => {
 
     afterEach(() => {
       try {
-        jest.runOnlyPendingTimers();
+        // The popup's own timers update its state.
+        act(() => jest.runOnlyPendingTimers());
       } finally {
         jest.useRealTimers();
       }
@@ -239,7 +260,9 @@ describe('ConnectScmBlock', () => {
       });
       await user.click(screen.getByRole('button', {name: 'Pause again'}));
 
-      expect(screen.getByText("Seer can't access acme/app")).toBeInTheDocument();
+      expect(
+        screen.getByText('Checking whether Seer can access acme/app')
+      ).toBeInTheDocument();
       expect(screen.queryByRole('button', {name: 'Continue'})).not.toBeInTheDocument();
 
       answer();
