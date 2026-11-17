@@ -72,10 +72,16 @@ export const OUT_OF_CREDITS_CHAT_MESSAGE = t(
 
 /**
  * Tooltip for a retry that stays disabled until the organization can afford it.
+ * The credit check's `denialReason` tells a daily usage limit apart from
+ * running out.
  */
-export const OUT_OF_CREDITS_RETRY_TOOLTIP = t(
-  'Your organization does not have enough Seer credits for this.'
-);
+export function getOutOfCreditsRetryTooltip(
+  denialReason: SeerCreditDenialReason | null
+): string {
+  return denialReason === 'daily_cap_exceeded'
+    ? t('Your organization hit its daily usage limit.')
+    : t('Your organization does not have enough Seer credits for this.');
+}
 
 /**
  * Stands in for the backend's `pr_creation_error` on a PR that failed for

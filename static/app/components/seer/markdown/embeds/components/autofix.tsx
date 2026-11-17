@@ -45,7 +45,7 @@ import {
 import {defineSeerEmbed} from 'sentry/components/seer/markdown/embeds/utils';
 import {
   getOutOfCreditsPRsMessage,
-  OUT_OF_CREDITS_RETRY_TOOLTIP,
+  getOutOfCreditsRetryTooltip,
   OUT_OF_CREDITS_STEP_MESSAGE,
 } from 'sentry/components/seer/outOfCredits/messages';
 import {SeerOutOfCreditsCta} from 'sentry/components/seer/outOfCredits/seerOutOfCreditsCta';
@@ -394,7 +394,7 @@ function AutofixRefContent({id, shortId, step}: AutofixRefContentProps) {
                 tooltipProps={{
                   title:
                     prFailedForCredits && !creditCheck.hasEnoughCredits
-                      ? OUT_OF_CREDITS_RETRY_TOOLTIP
+                      ? getOutOfCreditsRetryTooltip(creditCheck.denialReason)
                       : undefined,
                 }}
               >
