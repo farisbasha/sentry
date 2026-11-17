@@ -1284,3 +1284,26 @@ class RenewObjectstoreArtifactBundleTest(RenewArtifactBundleTest):
 
         mock_session.assert_not_called()
         assert ArtifactBundle.objects.get(id=self.artifact_bundle.id).date_added == now
+
+    def test_reupload_during_head_preserves_bundle(self) -> None:
+        session = self.artifact_bundle.get_objectstore_session()
+        replacement = self.create_artifact_bundle(self.organization, use_objectstore=True)
+        uploaded_at = timezone.now()
+
+        def head(storage_path: str) -> None:
+            # Assembly updates the same row and refreshes date_added before removing
+            # the old object, whose HEAD may then return missing.
+            ArtifactBundle.objects.filter(id=self.artifact_bundle.id).update(
+                storage_path=replacement.storage_path, date_added=uploaded_at
+            )
+
+        with (
+            patch.object(ArtifactBundle, "get_objectstore_session", return_value=session),
+            patch.object(session, "head", side_effect=head),
+        ):
+            self.renew()
+
+        self.artifact_bundle.refresh_from_db()
+        assert self.artifact_bundle.storage_path == replacement.storage_path
+        assert self.artifact_bundle.date_added == uploaded_at
+        assert self.linked_dates() == {self.old_date}

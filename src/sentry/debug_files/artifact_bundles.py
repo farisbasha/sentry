@@ -255,8 +255,12 @@ def renew_artifact_bundle(artifact_bundle_id: int, threshold_date: datetime, now
             logger.exception("artifact_bundle.objectstore_renewal_failed")
             return
         if metadata is None:
-            # A concurrent reupload may have replaced the missing object with a File.
-            bundles.filter(storage_path=bundle.storage_path).delete()
+            # Assembly replaces the backing object and refreshes date_added under this
+            # same row lock. Recheck the age and hold the lock through cascading deletion.
+            with atomic_transaction(using=(router.db_for_write(ArtifactBundle),)):
+                missing_bundle = bundles.select_for_update().first()
+                if missing_bundle is not None:
+                    missing_bundle.delete()
             return
 
     # We want to use a transaction, in order to keep the `date_added` consistent across multiple tables.
@@ -269,9 +273,8 @@ def renew_artifact_bundle(artifact_bundle_id: int, threshold_date: datetime, now
             router.db_for_write(ArtifactBundleIndex),
         )
     ):
-        # Recheck eligibility and the storage path in case another request renewed or
-        # replaced the bundle while we were contacting Objectstore.
-        updated_rows_count = bundles.filter(storage_path=bundle.storage_path).update(date_added=now)
+        # Assembly and other renewals refresh date_added, so recheck the age on update.
+        updated_rows_count = bundles.update(date_added=now)
         # We want to make cascading queries only if there were actual changes in the db. Nothing reads `date_added`
         # from the rows linked to the bundle, so with `date-only-on-bundle` they aren't renewed, which spares
         # rewriting every URL index and debug-ID row of the bundle.
