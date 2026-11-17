@@ -72,10 +72,10 @@ export function OverviewIssueAssignee({
       const path = {organizationIdOrSlug: organization.slug};
       queryClient.setQueriesData<ApiResponse<AutofixOverviewResponse>>(
         {
-          queryKey: apiOptions.as<unknown>()(
+          queryKey: apiOptions.queryKey(
             '/organizations/$organizationIdOrSlug/seer/autofix-overview/',
-            {path, staleTime: 0}
-          ).queryKey,
+            {path}
+          ),
         },
         previous =>
           previous && {
@@ -84,13 +84,9 @@ export function OverviewIssueAssignee({
           }
       );
       void queryClient.invalidateQueries({
-        queryKey: apiOptions.as<unknown>()(
-          '/organizations/$organizationIdOrSlug/issues/',
-          {
-            path,
-            staleTime: 0,
-          }
-        ).queryKey,
+        queryKey: apiOptions.queryKey('/organizations/$organizationIdOrSlug/issues/', {
+          path,
+        }),
       });
     },
     [groupId, organization.slug, queryClient]
