@@ -1,10 +1,8 @@
-from dataclasses import dataclass, replace
 from unittest.mock import patch
 
 import pytest
 
 from sentry.api.serializers import serialize
-from sentry.inbox.issue import ISSUE_USER_MENTIONED, IssueMentionedData
 from sentry.inbox.notebook import (
     NOTEBOOK,
     NotebookCompletedData,
@@ -29,25 +27,28 @@ from sentry.users.services.user.service import user_service
 from sentry.utils.registry import NoRegistrationExistsError
 
 
-@dataclass(frozen=True, kw_only=True)
-class LinkedMentionData(IssueMentionedData):
-    def get_url(self, subject_url: str) -> str:
-        return f"{subject_url}#comment-{self.comment_id}"
-
-
 @pytest.mark.parametrize(
-    "latest_data,expected_fragment",
+    "latest_type,latest_data,expected_fragment",
     [
-        ({"comment_id": 456}, "#comment-456"),
-        ({"comment_id": 456, "summary": "Old wording"}, "#comment-456"),
-        ({}, ""),
+        ("issue.user_mentioned", {"comment_id": 456}, "#activity-456"),
+        ("issue.team_mentioned", {"comment_id": 456, "summary": "Old wording"}, "#activity-456"),
+        ("issue.user_mentioned", {}, ""),
+        ("issue.user_assigned", {"activity_id": 789, "assignment_source": None}, "#activity-789"),
+        ("issue.team_assigned", {"activity_id": 789, "assignment_source": None}, "#activity-789"),
+        ("issue.user_assigned", {"assignment_source": None}, ""),
+        (
+            "issue.pr_ready_for_review",
+            {"pr_url": "https://github.com/example/repo/pull/1", "seer_run_id": 123},
+            "",
+        ),
     ],
 )
 @django_db_all
 def test_latest_event_url(
     default_group: Group,
     default_user: User,
-    latest_data: dict[str, int | str],
+    latest_type: str,
+    latest_data: dict[str, int | str | None],
     expected_fragment: str,
 ) -> None:
     item = Factories.create_inbox_item(
@@ -55,21 +56,15 @@ def test_latest_event_url(
         user=default_user,
         subject_id=str(default_group.id),
     )
-    latest = Factories.create_inbox_item_event(
-        inbox_item=item, type="issue.user_mentioned", data=latest_data
-    )
+    latest = Factories.create_inbox_item_event(inbox_item=item, type=latest_type, data=latest_data)
     previous = Factories.create_inbox_item_event(
         inbox_item=item,
-        type="issue.user_mentioned",
-        data={"comment_id": 123},
+        type="issue.user_assigned",
+        data={"activity_id": 123, "assignment_source": None},
     )
     previous.update(date_added=before_now(minutes=5))
 
-    with patch.dict(
-        inbox_item_event_type_registry.registrations,
-        {"issue.user_mentioned": replace(ISSUE_USER_MENTIONED, data_class=LinkedMentionData)},
-    ):
-        result = serialize(item, default_user, InboxItemSerializer())
+    result = serialize(item, default_user, InboxItemSerializer())
 
     assert result["latestEvent"]["id"] == str(latest.id)
     organization = default_group.organization
@@ -167,7 +162,8 @@ class InboxItemSerializerTest(TestCase):
         assert results[0]["latestEvent"]["id"] == str(latest.id)
         assert results[0]["latestEvent"]["data"] == {"commentId": "123"}
         assert results[0]["url"] == self.organization.absolute_url(
-            f"/organizations/{self.organization.slug}/inbox/issue/{first.id}/"
+            f"/organizations/{self.organization.slug}/inbox/issue/{first.id}/",
+            fragment="activity-123",
         )
         assert results[1]["title"] == "Second issue"
         assert results[1]["url"] == self.organization.absolute_url(
@@ -269,6 +265,10 @@ class TestNotebookEvents:
         assert result["type"] == event_type
         assert result["summary"] == event_type_definition.summary
         assert result["data"] == expected_data
+        expected_url = default_organization.absolute_url(
+            f"/organizations/{default_organization.slug}/inbox/notebook/{notebook.id}/"
+        )
+        assert serialize(item, default_user, InboxItemSerializer())["url"] == expected_url
 
 
 class InboxItemEventSerializerTest(TestCase):

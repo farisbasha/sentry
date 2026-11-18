@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from sentry.inbox.registry import inbox_item_event_type_registry, inbox_item_type_registry
 from sentry.inbox.types import InboxEventData, InboxEventSummary, InboxEventType, InboxItemType
@@ -39,10 +40,16 @@ class IssueAssignedData(InboxEventData):
     assignment_source: ActivityIntegration | None
     activity_id: int
 
+    def get_url(self, subject_url: str) -> str:
+        return urlsplit(subject_url)._replace(fragment=f"activity-{self.activity_id}").geturl()
+
 
 @dataclass(frozen=True, kw_only=True)
 class IssueMentionedData(InboxEventData):
-    comment_id: int  # Comment reference exposed as commentId by the activity API.
+    comment_id: int  # ID of the note activity, exposed as commentId by the activity API.
+
+    def get_url(self, subject_url: str) -> str:
+        return urlsplit(subject_url)._replace(fragment=f"activity-{self.comment_id}").geturl()
 
 
 @dataclass(frozen=True, kw_only=True)
